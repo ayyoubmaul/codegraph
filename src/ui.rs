@@ -43,6 +43,7 @@ pub async fn serve(
 
     let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
     let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
+    crate::embed::warm(embedder.clone());
     let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(vindex_built));
 
     // With --watch, index + watch on a background thread so the UI serves now.

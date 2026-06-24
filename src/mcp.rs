@@ -61,9 +61,11 @@ struct TopKArgs {
 impl CodegraphServer {
     pub fn new(store: LadybugStore) -> anyhow::Result<Self> {
         let vindex = crate::vector::build_from_store(&store)?;
+        let embedder = Arc::new(Mutex::new(None));
+        crate::embed::warm(embedder.clone());
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
-            embedder: Arc::new(Mutex::new(None)),
+            embedder,
             vindex: Arc::new(Mutex::new(vindex)),
             tool_router: Self::tool_router(),
         })
@@ -76,6 +78,7 @@ impl CodegraphServer {
         embedder: Arc<Mutex<Option<Embedder>>>,
         vindex: crate::vector::SharedVector,
     ) -> Self {
+        crate::embed::warm(embedder.clone());
         Self {
             store,
             embedder,

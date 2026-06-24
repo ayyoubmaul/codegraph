@@ -5,8 +5,10 @@
 //! offline — no API keys, no per-query network.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use tokio::sync::Mutex;
 
 use crate::graph::{GraphBatch, NodeKind};
 
@@ -75,4 +77,22 @@ pub fn embed_defs(
         .zip(vectors)
         .map(|((id, _), v)| (id, v))
         .collect())
+}
+
+/// Eagerly load the embedding model on a background thread so the first `search`
+/// is fast — it pays the ~3 s ONNX init (and one-time model download) at startup
+/// instead of on the first query. No-op if already loaded.
+pub fn warm(embedder: Arc<Mutex<Option<Embedder>>>) {
+    std::thread::spawn(move || {
+        let mut guard = embedder.blocking_lock();
+        if guard.is_none() {
+            match Embedder::new() {
+                Ok(e) => {
+                    *guard = Some(e);
+                    eprintln!("codegraph: embedding model ready");
+                }
+                Err(e) => eprintln!("codegraph: embedding model load failed: {e}"),
+            }
+        }
+    });
 }
