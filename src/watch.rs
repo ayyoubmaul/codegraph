@@ -61,7 +61,8 @@ pub fn index_once_owned(
         if embedder.is_none() {
             *embedder = Some(Embedder::new()?);
         }
-        let items = embed::embed_defs(embedder.as_mut().unwrap(), &batch)?;
+        let already = store.embedded_ids()?;
+        let items = embed::embed_defs(embedder.as_mut().unwrap(), &batch, &already)?;
         store.set_embeddings(&items)?;
     }
     eprintln!("codegraph: indexed {} files", cache.len());
@@ -169,12 +170,15 @@ fn update_file(
         s.write_batch(&sub)?;
     }
     if embed_on {
+        // The changed file's defs were just removed, so they have no cached
+        // embedding — embed them all.
+        let skip = std::collections::HashSet::new();
         let items = {
             let mut guard = embedder.blocking_lock();
             if guard.is_none() {
                 *guard = Some(Embedder::new()?);
             }
-            embed::embed_defs(guard.as_mut().unwrap(), &sub)?
+            embed::embed_defs(guard.as_mut().unwrap(), &sub, &skip)?
         };
         if !items.is_empty() {
             store.blocking_lock().set_embeddings(&items)?;

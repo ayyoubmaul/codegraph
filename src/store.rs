@@ -277,6 +277,21 @@ impl LadybugStore {
         self.count("MATCH (:Def) RETURN count(*)")
     }
 
+    /// Ids of definitions that already have an embedding (so re-indexing can
+    /// skip them — a def's embed-text is fixed by its id).
+    pub fn embedded_ids(&self) -> anyhow::Result<std::collections::HashSet<String>> {
+        let conn = self.connect()?;
+        let result = conn
+            .query("MATCH (d:Def) WHERE d.embedding IS NOT NULL RETURN d.id")
+            .map_err(|e| anyhow::anyhow!("lbug embedded_ids: {e}"))?;
+        Ok(result
+            .filter_map(|row| match row.into_iter().next()? {
+                Value::String(s) => Some(s),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Bulk-load a batch into EMPTY tables via CSV `COPY` — the fast path for a
     /// fresh index. Writes temp CSVs under `tmp_dir`. `COPY` runs once per table,
     /// so callers use this only when the database is empty.

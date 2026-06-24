@@ -116,11 +116,25 @@ fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Res
 
         if embed {
             let embed_start = Instant::now();
-            let mut embedder = embed::Embedder::new()?;
-            let items = embed::embed_defs(&mut embedder, &batch)?;
-            let n = items.len();
-            store.set_embeddings(&items)?;
-            println!("embedded {n} definitions in {:.2?}", embed_start.elapsed());
+            let already = store.embedded_ids()?;
+            let pending = batch
+                .nodes
+                .iter()
+                .filter(|n| n.kind == graph::NodeKind::Definition && !already.contains(&n.id))
+                .count();
+            if pending == 0 {
+                println!("embeddings up to date ({} cached)", already.len());
+            } else {
+                let mut embedder = embed::Embedder::new()?;
+                let items = embed::embed_defs(&mut embedder, &batch, &already)?;
+                let n = items.len();
+                store.set_embeddings(&items)?;
+                println!(
+                    "embedded {n} new definitions ({} cached) in {:.2?}",
+                    already.len(),
+                    embed_start.elapsed()
+                );
+            }
         }
 
         let (files, defs_c, defines, calls, imports) = store.summary()?;

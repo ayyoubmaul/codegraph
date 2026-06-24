@@ -83,6 +83,11 @@ Vertical slices, each one builds and runs:
       same in-process store the server queries (no second process, no lock
       conflict). Verified live: an edit propagated to `/api/graph` (2→3 nodes)
       with no restart.
+- [x] **Slice 9 — scale.** (a) walker prunes heavy dirs (node_modules/target/
+      dist/…) + skips files > 512 KB; (b) a fresh index bulk-loads via CSV `COPY`
+      instead of per-row `MERGE`; (c) `--embed` caches by def id, so re-index
+      skips already-embedded defs (full re-embed → instant). Index a big monorepo
+      or a parent folder of repos without the file/embedding count exploding.
 
 ## Build & use
 

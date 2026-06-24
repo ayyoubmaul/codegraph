@@ -4,6 +4,8 @@
 //! (~130 MB), is cached under the fastembed cache dir, and then runs fully
 //! offline — no API keys, no per-query network.
 
+use std::collections::HashSet;
+
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
 use crate::graph::{GraphBatch, NodeKind};
@@ -50,11 +52,12 @@ impl Embedder {
 pub fn embed_defs(
     embedder: &mut Embedder,
     batch: &GraphBatch,
+    skip: &HashSet<String>,
 ) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
     let defs: Vec<(String, String)> = batch
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::Definition)
+        .filter(|n| n.kind == NodeKind::Definition && !skip.contains(&n.id))
         .map(|n| {
             let text = match n.symbol_kind {
                 Some(k) => format!("{k:?} {}", n.name),
