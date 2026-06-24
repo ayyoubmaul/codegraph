@@ -50,11 +50,19 @@ Vertical slices, each one builds and runs:
 - [x] **Slice 2c — call edges + queries.** Extract `Calls` edges (name-based
       resolution, same-file preferred) and Cypher-backed `who-calls` /
       `call-chain` commands. *(`Imports` edges + type-aware resolution: later.)*
-- [ ] **Slice 3 — semantic.** Embed symbols with fastembed → Kùzu HNSW;
-      hybrid query (vector recall → graph expansion).
-- [ ] **Slice 4 — incremental.** `notify` watcher patches the graph in-place.
-- [ ] **Slice 5 — MCP server.** Expose `search`, `who_calls`, `call_chain`,
-      `definition`, `neighbors`, `impact_of` over rmcp/stdio.
+- [ ] **Slice 2d — imports + sharper resolution.** `Imports` edges; type-aware
+      call resolution to cut the same-name conflation from 2c.
+- [ ] **Slice 3 — semantic (flagship of the bet).** Embed symbols with
+      `fastembed` (local, offline) → LadybugDB `vector` extension (HNSW); hybrid
+      query: vector recall by *meaning* → structural graph expansion.
+- [ ] **Slice 4 — incremental.** `notify` watcher re-parses only changed files
+      and patches the graph in-place (never stale).
+- [ ] **Slice 5 — graph intelligence.** Community detection (**Louvain**) +
+      importance (**PageRank**) via LadybugDB's `algo` extension; store a
+      `community` / `rank` on each `Def`. Surfaces module clusters,
+      architectural boundaries, and most-depended-on code.
+- [ ] **Slice 6 — MCP server.** Expose `search`, `who-calls`, `call-chain`,
+      `definition`, `neighbors`, `impact-of`, `communities` over rmcp/stdio.
 
 ## Build
 
@@ -64,10 +72,10 @@ cargo build --release
 ./target/release/codegraph index . --json    # every symbol as JSON
 ```
 
-Prerequisites for the upcoming graph/semantic slices:
+Prerequisites:
 
-- `cmake` (Kùzu compiles a C++ core) — `brew install cmake`
-- First run downloads the embedding model once, then runs fully offline.
+- `cmake` (`lbug` compiles LadybugDB's C++ core) — `brew install cmake` ✓ installed
+- The semantic slice downloads the embedding model once, then runs fully offline.
 
 ## License
 
