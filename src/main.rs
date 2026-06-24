@@ -9,6 +9,7 @@ mod cli;
 mod embed;
 mod graph;
 mod lang;
+mod mcp;
 mod parse;
 mod store;
 mod symbol;
@@ -30,6 +31,7 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -47,7 +49,13 @@ fn main() -> anyhow::Result<()> {
         Command::Important { db, k } => important(&db, k),
         Command::Communities { db, k } => communities(&db, k),
         Command::Watch { path, db, embed } => watch::run(&path, &db, embed),
+        Command::Serve { db } => serve_cmd(&db),
     }
+}
+
+fn serve_cmd(db: &Path) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(mcp::serve(db))
 }
 
 fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Result<()> {

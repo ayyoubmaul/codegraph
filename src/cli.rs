@@ -114,4 +114,11 @@ pub enum Command {
         #[arg(long)]
         embed: bool,
     },
+
+    /// Run the MCP server over stdio so AI agents can query the graph.
+    Serve {
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+    },
 }

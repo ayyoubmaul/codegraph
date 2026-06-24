@@ -69,21 +69,41 @@ Vertical slices, each one builds and runs:
       `algo` extension loads over the network → would break offline), storing
       `pagerank`/`community` on each `Def`. `important` + `communities` commands.
       Verified on sieve (recovered the auth/cache/proxy/semantic-cache modules).
-- [ ] **Slice 6 — MCP server.** Expose `search`, `who-calls`, `call-chain`,
-      `definition`, `neighbors`, `impact-of`, `communities` over rmcp/stdio.
+- [x] **Slice 6 — MCP server.** `serve --db` exposes `search`, `who_calls`,
+      `call_chain`, `important` over rmcp/stdio. Verified with a full JSON-RPC
+      session (initialize → tools/list → tools/call). *(communities/impact tools
+      are easy follow-ons.)*
 
-## Build
+## Build & use
 
 ```bash
 cargo build --release
-./target/release/codegraph index .          # summary
-./target/release/codegraph index . --json    # every symbol as JSON
+B=./target/release/codegraph
+
+$B index <repo> --db graph.db --embed         # parse → graph → embeddings
+$B analyze --db graph.db                       # PageRank + Louvain communities
+$B search "rate limiting logic" --db graph.db  # find by meaning
+$B who-calls parseAuth --db graph.db
+$B call-chain handleRequest --db graph.db --depth 3
+$B important --db graph.db                      # most-depended-on code
+$B communities --db graph.db                    # module clusters
+$B watch <repo> --db graph.db                   # keep fresh as you edit
 ```
 
-Prerequisites:
+## Use from an AI agent (MCP)
 
-- `cmake` (`lbug` compiles LadybugDB's C++ core) — `brew install cmake` ✓ installed
-- The semantic slice downloads the embedding model once, then runs fully offline.
+Point any MCP client at `codegraph serve`. For Claude Code:
+
+```bash
+claude mcp add codegraph -- /abs/path/to/codegraph serve --db /abs/path/to/graph.db
+```
+
+Tools exposed: `search` (by meaning), `who_calls`, `call_chain`, `important`.
+
+## Prerequisites
+
+- `cmake` (`lbug` compiles LadybugDB's C++ core) — `brew install cmake`
+- `search`/`--embed` download the embedding model once, then run fully offline.
 
 ## License
 
