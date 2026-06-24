@@ -78,6 +78,15 @@ pub struct GraphBatch {
     pub edges: Vec<Edge>,
 }
 
+/// Names with more candidates than this (and no local match) are treated as too
+/// ambiguous to resolve — dropped rather than fanned out as noise.
+const MAX_AMBIGUOUS: usize = 6;
+
+/// The workspace repo a qualified path belongs to (its first path segment).
+fn repo_of(file: &str) -> &str {
+    file.split('/').next().unwrap_or("")
+}
+
 impl GraphBatch {
     /// Stable id for a definition node.
     pub fn def_id(file: &str, name: &str, start_line: usize) -> String {
@@ -191,20 +200,41 @@ impl GraphBatch {
                 pool = candidates.clone();
             }
 
-            // Locality tiers: same-file → imported files → repo-wide.
+            // Resolution tiers, most precise first: same-file → imported files
+            // → globally-unique name (confident even cross-repo) → same-repo
+            // (capped). Ambiguous, non-local names are dropped rather than
+            // fanned out across the whole workspace (which was pure noise).
             let same_file: Vec<&Symbol> =
                 pool.iter().copied().filter(|s| s.file == call.file).collect();
             let targets: Vec<&Symbol> = if !same_file.is_empty() {
                 same_file
-            } else if let Some(imported) = imports_by_file.get(call.file.as_str()) {
-                let in_imports: Vec<&Symbol> = pool
-                    .iter()
-                    .copied()
-                    .filter(|s| imported.contains(s.file.as_str()))
-                    .collect();
-                if in_imports.is_empty() { pool } else { in_imports }
             } else {
-                pool
+                let imported: Vec<&Symbol> = imports_by_file
+                    .get(call.file.as_str())
+                    .map(|imps| {
+                        pool.iter()
+                            .copied()
+                            .filter(|s| imps.contains(s.file.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !imported.is_empty() {
+                    imported
+                } else if pool.len() == 1 {
+                    pool // globally unique name → confident, even across repos
+                } else {
+                    let call_repo = repo_of(&call.file);
+                    let same_repo: Vec<&Symbol> = pool
+                        .iter()
+                        .copied()
+                        .filter(|s| repo_of(&s.file) == call_repo)
+                        .collect();
+                    if !same_repo.is_empty() && same_repo.len() <= MAX_AMBIGUOUS {
+                        same_repo
+                    } else {
+                        Vec::new() // too ambiguous and non-local → no edge
+                    }
+                }
             };
 
             for callee in targets {
