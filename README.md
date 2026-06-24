@@ -73,6 +73,11 @@ Vertical slices, each one builds and runs:
       `call_chain`, `important` over rmcp/stdio. Verified with a full JSON-RPC
       session (initialize → tools/list → tools/call). *(communities/impact tools
       are easy follow-ons.)*
+- [x] **Slice 7 — web UI.** `ui --db` serves a **no-Docker, offline** browser UI
+      (page + JS embedded in the binary): a force-directed call graph colored by
+      Louvain community, sized by PageRank, with a semantic-search highlight and
+      click-to-see callers/callees. Verified: serves the page + `/api/graph`
+      (185 nodes / 364 edges, each with community + pagerank).
 
 ## Build & use
 
@@ -88,6 +93,7 @@ $B call-chain handleRequest --db graph.db --depth 3
 $B important --db graph.db                      # most-depended-on code
 $B communities --db graph.db                    # module clusters
 $B watch <repo> --db graph.db                   # keep fresh as you edit
+$B ui --db graph.db                             # explore in a browser → http://127.0.0.1:7700
 ```
 
 ## Use from an AI agent (MCP)

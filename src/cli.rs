@@ -121,4 +121,14 @@ pub enum Command {
         #[arg(long)]
         db: PathBuf,
     },
+
+    /// Launch the web UI to explore the graph in a browser.
+    Ui {
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// Port to serve on.
+        #[arg(long, default_value_t = 7700)]
+        port: u16,
+    },
 }

@@ -13,6 +13,7 @@ mod mcp;
 mod parse;
 mod store;
 mod symbol;
+mod ui;
 mod walk;
 mod watch;
 
@@ -50,12 +51,18 @@ fn main() -> anyhow::Result<()> {
         Command::Communities { db, k } => communities(&db, k),
         Command::Watch { path, db, embed } => watch::run(&path, &db, embed),
         Command::Serve { db } => serve_cmd(&db),
+        Command::Ui { db, port } => ui_cmd(&db, port),
     }
 }
 
 fn serve_cmd(db: &Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(mcp::serve(db))
+}
+
+fn ui_cmd(db: &Path, port: u16) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(ui::serve(db, port))
 }
 
 fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Result<()> {

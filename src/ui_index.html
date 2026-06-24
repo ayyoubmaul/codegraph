@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>codegraph</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0d1117; color: #c9d1d9;
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
+  #canvas { display: block; cursor: grab; }
+  #canvas:active { cursor: grabbing; }
+  .panel { position: fixed; background: #161b22cc; border: 1px solid #30363d;
+    border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+  #top { top: 12px; left: 12px; width: 320px; }
+  #top h1 { margin: 0 0 8px; font-size: 14px; color: #58a6ff; }
+  #q { width: 100%; padding: 7px 9px; background: #0d1117; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 6px; outline: none; }
+  #q:focus { border-color: #58a6ff; }
+  #hint { color: #8b949e; margin-top: 6px; font-size: 11px; }
+  #info { bottom: 12px; left: 12px; width: 320px; max-height: 45%; overflow: auto; display: none; }
+  #info h2 { margin: 0 0 4px; font-size: 13px; color: #58a6ff; word-break: break-all; }
+  #info .meta { color: #8b949e; font-size: 11px; margin-bottom: 8px; word-break: break-all; }
+  #info .sec { color: #d29922; margin: 8px 0 2px; }
+  #info .item { color: #c9d1d9; padding-left: 8px; }
+  #info .empty { color: #6e7681; padding-left: 8px; }
+  #stats { top: 12px; right: 12px; color: #8b949e; text-align: right; font-size: 11px; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div id="top" class="panel">
+  <h1>codegraph</h1>
+  <input id="q" placeholder="search by meaning — e.g. rate limiting" autocomplete="off" />
+  <div id="hint">drag to pan · scroll to zoom · click a node</div>
+</div>
+
+<div id="stats" class="panel"></div>
+<div id="info" class="panel"></div>
+
+<script>
+const cv = document.getElementById('canvas');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = Math.max(1, window.devicePixelRatio || 1);
+function resize() {
+  W = cv.clientWidth = window.innerWidth;
+  H = cv.clientHeight = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+}
+window.addEventListener('resize', () => { resize(); });
+resize();
+
+let nodes = [], edges = [], byId = new Map();
+const outN = new Map(), inN = new Map();   // adjacency by id
+let selected = null, matched = new Set();
+let scale = 1, ox = 0, oy = 0, alpha = 1;
+
+function colorFor(c) { if (c == null) return '#7d8590'; const h = (c * 47) % 360; return `hsl(${h},65%,56%)`; }
+
+async function load() {
+  const g = await (await fetch('/api/graph')).json();
+  edges = g.edges;
+  let prMax = 0;
+  for (const n of g.nodes) prMax = Math.max(prMax, n.pagerank || 0);
+  nodes = g.nodes.map(n => ({
+    ...n,
+    x: (Math.random() - 0.5) * 800, y: (Math.random() - 0.5) * 800, vx: 0, vy: 0,
+    r: 4 + 12 * Math.sqrt((n.pagerank || 0) / (prMax || 1)),
+  }));
+  byId = new Map(nodes.map(n => [n.id, n]));
+  for (const e of edges) {
+    (outN.get(e.source) || outN.set(e.source, []).get(e.source)).push(e.target);
+    (inN.get(e.target) || inN.set(e.target, []).get(e.target)).push(e.source);
+  }
+  const comms = new Set(nodes.map(n => n.community).filter(c => c != null));
+  document.getElementById('stats').textContent =
+    `${nodes.length} defs · ${edges.length} calls · ${comms.size} communities`;
+  // center
+  ox = W / 2; oy = H / 2;
+}
+
+function step() {
+  if (alpha < 0.02) return;
+  const k = 6000, n = nodes.length;
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i];
+    for (let j = i + 1; j < n; j++) {
+      const b = nodes[j];
+      let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
+      const f = k / d2, d = Math.sqrt(d2);
+      const fx = (dx / d) * f, fy = (dy / d) * f;
+      a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+    }
+  }
+  for (const e of edges) {
+    const a = byId.get(e.source), b = byId.get(e.target);
+    if (!a || !b) continue;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const fx = dx * 0.008, fy = dy * 0.008;
+    a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+  }
+  for (const a of nodes) {
+    a.vx += -a.x * 0.0015; a.vy += -a.y * 0.0015;     // gravity to center
+    if (a === dragged) continue;
+    a.x += a.vx * alpha * 0.5; a.y += a.vy * alpha * 0.5;
+    a.vx *= 0.86; a.vy *= 0.86;
+  }
+  alpha *= 0.995;
+}
+
+function neighborsOf(id) {
+  const s = new Set([id]);
+  (outN.get(id) || []).forEach(x => s.add(x));
+  (inN.get(id) || []).forEach(x => s.add(x));
+  return s;
+}
+
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.setTransform(scale * DPR, 0, 0, scale * DPR, ox * DPR, oy * DPR);
+
+  const hl = selected ? neighborsOf(selected.id) : null;
+
+  ctx.lineWidth = 1 / scale;
+  for (const e of edges) {
+    const a = byId.get(e.source), b = byId.get(e.target);
+    if (!a || !b) continue;
+    const on = hl && (hl.has(a.id) && hl.has(b.id));
+    ctx.strokeStyle = on ? '#58a6ff99' : (hl ? '#21262d' : '#30363d88');
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+
+  for (const a of nodes) {
+    const dim = hl && !hl.has(a.id);
+    ctx.globalAlpha = dim ? 0.25 : 1;
+    ctx.beginPath(); ctx.arc(a.x, a.y, a.r, 0, 7);
+    ctx.fillStyle = colorFor(a.community); ctx.fill();
+    if (matched.has(a.id)) { ctx.lineWidth = 2.5 / scale; ctx.strokeStyle = '#fff'; ctx.stroke(); }
+    if (a === selected) { ctx.lineWidth = 2.5 / scale; ctx.strokeStyle = '#58a6ff'; ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  }
+
+  // labels: selected, matched, and large nodes
+  ctx.fillStyle = '#e6edf3';
+  ctx.font = `${12 / scale}px ui-monospace, monospace`;
+  for (const a of nodes) {
+    if (a === selected || matched.has(a.id) || a.r > 9) {
+      ctx.fillText(a.name, a.x + a.r + 2 / scale, a.y + 3 / scale);
+    }
+  }
+}
+
+function frame() { step(); draw(); requestAnimationFrame(frame); }
+
+// ---- interaction ----
+let dragged = null, panning = false, lastX = 0, lastY = 0, moved = false;
+function worldAt(px, py) { return { x: (px - ox) / scale, y: (py - oy) / scale }; }
+function nodeAt(px, py) {
+  const w = worldAt(px, py);
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const a = nodes[i], dx = a.x - w.x, dy = a.y - w.y;
+    if (dx * dx + dy * dy <= (a.r + 3) * (a.r + 3)) return a;
+  }
+  return null;
+}
+cv.addEventListener('mousedown', e => {
+  moved = false; lastX = e.clientX; lastY = e.clientY;
+  const hit = nodeAt(e.clientX, e.clientY);
+  if (hit) { dragged = hit; alpha = Math.max(alpha, 0.3); } else { panning = true; }
+});
+window.addEventListener('mousemove', e => {
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+  if (dragged) { dragged.x += dx / scale; dragged.y += dy / scale; dragged.vx = 0; dragged.vy = 0; }
+  else if (panning) { ox += dx; oy += dy; }
+  lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener('mouseup', e => {
+  if (dragged && !moved) select(dragged);
+  else if (panning && !moved) { select(null); }
+  dragged = null; panning = false;
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+  const wx = (e.clientX - ox) / scale, wy = (e.clientY - oy) / scale;
+  scale *= f; ox = e.clientX - wx * scale; oy = e.clientY - wy * scale;
+}, { passive: false });
+
+function row(label, list) {
+  if (!list.length) return `<div class="sec">${label}</div><div class="empty">none</div>`;
+  return `<div class="sec">${label} (${list.length})</div>` +
+    list.map(id => { const n = byId.get(id); return `<div class="item">${n ? n.name : id}</div>`; }).join('');
+}
+function select(n) {
+  selected = n;
+  const info = document.getElementById('info');
+  if (!n) { info.style.display = 'none'; return; }
+  info.style.display = 'block';
+  const pr = n.pagerank != null ? n.pagerank.toFixed(4) : '—';
+  const cm = n.community != null ? n.community : '—';
+  info.innerHTML =
+    `<h2>${n.name}</h2>` +
+    `<div class="meta">${n.kind} · ${n.file} · community ${cm} · pagerank ${pr}</div>` +
+    row('called by', inN.get(n.id) || []) +
+    row('calls', outN.get(n.id) || []);
+}
+
+const qbox = document.getElementById('q');
+qbox.addEventListener('keydown', async e => {
+  if (e.key !== 'Enter') return;
+  const q = qbox.value.trim();
+  if (!q) { matched = new Set(); return; }
+  const r = await (await fetch('/api/search?q=' + encodeURIComponent(q) + '&k=15')).json();
+  matched = new Set(r.hits.map(h => h.id));
+  // center on the best hit
+  const top = r.hits[0] && byId.get(r.hits[0].id);
+  if (top) { scale = 1.3; ox = W / 2 - top.x * scale; oy = H / 2 - top.y * scale; select(top); }
+});
+
+load().then(frame);
+</script>
+</body>
+</html>

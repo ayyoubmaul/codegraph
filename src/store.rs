@@ -25,6 +25,17 @@ pub struct DefHit {
     pub start_line: i64,
 }
 
+/// A definition node with metadata, for the UI graph.
+#[derive(serde::Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub name: String,
+    pub file: String,
+    pub kind: String,
+    pub community: Option<i64>,
+    pub pagerank: Option<f64>,
+}
+
 impl LadybugStore {
     /// Open (or create) a LadybugDB database at `path` and ensure the schema.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
@@ -261,6 +272,40 @@ impl LadybugStore {
             .collect())
     }
 
+    /// All definitions with their metadata (for the UI graph).
+    pub fn graph_nodes(&self) -> anyhow::Result<Vec<GraphNode>> {
+        let conn = self.connect()?;
+        let result = conn
+            .query("MATCH (d:Def) RETURN d.id, d.name, d.file, d.kind, d.community, d.pagerank")
+            .map_err(|e| anyhow::anyhow!("lbug graph_nodes: {e}"))?;
+        Ok(result
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                let id = as_string(it.next()?)?;
+                let name = as_string(it.next()?)?;
+                let file = as_string(it.next()?)?;
+                let kind = as_string(it.next()?)?;
+                let community = match it.next()? {
+                    Value::Int64(n) => Some(n),
+                    _ => None,
+                };
+                let pagerank = match it.next()? {
+                    Value::Double(f) => Some(f),
+                    Value::Float(f) => Some(f as f64),
+                    _ => None,
+                };
+                Some(GraphNode {
+                    id,
+                    name,
+                    file,
+                    kind,
+                    community,
+                    pagerank,
+                })
+            })
+            .collect())
+    }
+
     fn count(&self, query: &str) -> anyhow::Result<u64> {
         let conn = self.connect()?;
         let mut result = conn
@@ -414,6 +459,13 @@ fn row_to_hit(row: Vec<Value>) -> Option<DefHit> {
         file,
         start_line,
     })
+}
+
+fn as_string(v: Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s),
+        _ => None,
+    }
 }
 
 fn row_to_hit_score(row: Vec<Value>) -> Option<(DefHit, f32)> {
