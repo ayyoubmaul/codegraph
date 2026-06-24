@@ -31,4 +31,25 @@ pub enum Command {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+
+    /// Show the direct callers of a symbol (uses a `--db` built by `index`).
+    WhoCalls {
+        /// Symbol name to look up.
+        name: String,
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+    },
+
+    /// Show the definitions transitively reachable from a symbol via calls.
+    CallChain {
+        /// Symbol name to start from.
+        name: String,
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// Max hops to traverse (1..=10).
+        #[arg(long, default_value_t = 3)]
+        depth: u8,
+    },
 }

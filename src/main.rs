@@ -32,6 +32,8 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Index { path, json, db } => index(&path, json, db.as_deref()),
+        Command::WhoCalls { name, db } => who_calls(&name, &db),
+        Command::CallChain { name, db, depth } => call_chain(&name, &db, depth),
     }
 }
 
@@ -43,25 +45,32 @@ fn index(root: &Path, json: bool, db: Option<&Path>) -> anyhow::Result<()> {
     let rel_paths: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
 
     // Parse files in parallel; failures on a single file are skipped, not fatal.
-    let symbols: Vec<Symbol> = files
+    let parsed: Vec<parse::ParseResult> = files
         .par_iter()
-        .flat_map_iter(|f| match std::fs::read(&f.path) {
+        .map(|f| match std::fs::read(&f.path) {
             Ok(src) => parse::parse_file(&f.rel, &src, f.lang).unwrap_or_default(),
-            Err(_) => Vec::new(),
+            Err(_) => parse::ParseResult::default(),
         })
         .collect();
 
+    let mut symbols: Vec<Symbol> = Vec::new();
+    let mut calls: Vec<graph::CallRef> = Vec::new();
+    for p in parsed {
+        symbols.extend(p.symbols);
+        calls.extend(p.calls);
+    }
+
     // Assemble the graph batch and (optionally) persist it to LadybugDB.
-    let batch = graph::GraphBatch::build(&rel_paths, &symbols);
+    let batch = graph::GraphBatch::build(&rel_paths, &symbols, &calls);
     let elapsed = start.elapsed();
 
     if let Some(db_path) = db {
         let persist_start = Instant::now();
         let mut store = store::LadybugStore::open(db_path)?;
         store.write_batch(&batch)?;
-        let (files, defs, defines) = store.summary()?;
+        let (files, defs, defines, calls) = store.summary()?;
         println!(
-            "persisted to {} → {files} files, {defs} defs, {defines} defines edges in {:.2?}",
+            "persisted to {} → {files} files, {defs} defs, {defines} defines, {calls} calls in {:.2?}",
             db_path.display(),
             persist_start.elapsed()
         );
@@ -87,5 +96,36 @@ fn index(root: &Path, json: bool, db: Option<&Path>) -> anyhow::Result<()> {
         println!("  {kind:<10} {count}");
     }
 
+    Ok(())
+}
+
+fn who_calls(name: &str, db: &Path) -> anyhow::Result<()> {
+    let store = store::LadybugStore::open(db)?;
+    let hits = store.who_calls(name)?;
+    if hits.is_empty() {
+        println!("no callers of `{name}` found");
+    } else {
+        println!("{} caller(s) of `{name}`:", hits.len());
+        for h in hits {
+            println!("  {:<28} {}:{}", h.name, h.file, h.start_line);
+        }
+    }
+    Ok(())
+}
+
+fn call_chain(name: &str, db: &Path, depth: u8) -> anyhow::Result<()> {
+    let store = store::LadybugStore::open(db)?;
+    let hits = store.call_chain(name, depth)?;
+    if hits.is_empty() {
+        println!("`{name}` reaches nothing within depth {depth}");
+    } else {
+        println!(
+            "`{name}` reaches {} definition(s) within depth {depth}:",
+            hits.len()
+        );
+        for h in hits {
+            println!("  {:<28} {}:{}", h.name, h.file, h.start_line);
+        }
+    }
     Ok(())
 }

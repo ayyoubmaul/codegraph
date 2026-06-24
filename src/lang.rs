@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use tree_sitter::Language;
+use tree_sitter::{Language, Node};
 
 use crate::symbol::SymbolKind;
 
@@ -90,5 +90,29 @@ impl Lang {
             },
         };
         Some(kind)
+    }
+
+    /// Is this node a function/method call?
+    pub fn is_call_node(self, node_kind: &str) -> bool {
+        match self {
+            Lang::Python => node_kind == "call",
+            _ => node_kind == "call_expression",
+        }
+    }
+
+    /// Extract the callee name from a call node's `function` field, unwrapping
+    /// method/field/scoped access down to the final identifier.
+    pub fn callee_name_of(self, call_node: Node, source: &[u8]) -> Option<String> {
+        let func = call_node.child_by_field_name("function")?;
+        let name_node = match func.kind() {
+            "identifier" | "field_identifier" | "property_identifier" | "type_identifier" => func,
+            "field_expression" => func.child_by_field_name("field")?, // Rust  a.b()
+            "selector_expression" => func.child_by_field_name("field")?, // Go  pkg.F()
+            "member_expression" => func.child_by_field_name("property")?, // JS/TS a.b()
+            "attribute" => func.child_by_field_name("attribute")?,     // Python a.b()
+            "scoped_identifier" => func.child_by_field_name("name")?,  // Rust  a::b()
+            _ => return None,
+        };
+        name_node.utf8_text(source).ok().map(|s| s.to_string())
     }
 }

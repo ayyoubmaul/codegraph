@@ -2,9 +2,10 @@
 //!
 //! Parsing produces a [`GraphBatch`] of nodes and edges; a [`Store`] persists
 //! batches and answers queries. The concrete store (LadybugDB via the `lbug`
-//! crate) lands in Slice 2b — keeping callers behind this trait isolates the
-//! FFI/cmake boundary and keeps the backend swappable (fallback: SQLite +
-//! sqlite-vec).
+//! crate) lives behind the trait — isolating the FFI/cmake boundary and keeping
+//! the backend swappable (fallback: SQLite + sqlite-vec).
+
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -40,8 +41,7 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
-/// The kinds of relationship we record. `Calls`/`Imports` are populated in a
-/// later slice once call/import resolution lands.
+/// The kinds of relationship we record. `Imports` is populated in a later slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
@@ -52,6 +52,16 @@ pub enum EdgeKind {
     Calls,
     /// A file imports another module/file.
     Imports,
+}
+
+/// An unresolved call site: a caller definition invoking a callee *by name*.
+/// `graph::GraphBatch::build` resolves the name to one or more definitions.
+#[derive(Debug, Clone)]
+pub struct CallRef {
+    pub caller_id: String,
+    pub callee_name: String,
+    /// File the call occurs in (used to prefer same-file resolution).
+    pub file: String,
 }
 
 /// The unit of work written to a [`Store`]: everything extracted in one pass.
@@ -67,10 +77,14 @@ impl GraphBatch {
         format!("{file}#{name}@{start_line}")
     }
 
-    /// Build a batch from discovered files and their extracted symbols: one
-    /// `File` node per file, one `Definition` node per symbol, and a `Defines`
-    /// edge from each file to the definitions it contains.
-    pub fn build(files: &[String], symbols: &[Symbol]) -> GraphBatch {
+    /// Build a batch from discovered files, their definitions, and call sites.
+    ///
+    /// Nodes: one `File` per file, one `Definition` per symbol. Edges: a
+    /// `Defines` edge file→def, and `Calls` edges resolved name-based. Call
+    /// resolution prefers a same-file definition of that name; otherwise it
+    /// links to every repo-wide definition with the name (imprecise by design —
+    /// type-aware resolution is future work). Self-loops are dropped.
+    pub fn build(files: &[String], symbols: &[Symbol], calls: &[CallRef]) -> GraphBatch {
         let mut batch = GraphBatch::default();
 
         for file in files {
@@ -103,13 +117,50 @@ impl GraphBatch {
             });
         }
 
+        // Resolve call sites to Def→Def `Calls` edges.
+        let mut by_name: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+        for s in symbols {
+            by_name.entry(s.name.as_str()).or_default().push(s);
+        }
+
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for call in calls {
+            let Some(candidates) = by_name.get(call.callee_name.as_str()) else {
+                continue;
+            };
+            let same_file: Vec<&Symbol> = candidates
+                .iter()
+                .copied()
+                .filter(|s| s.file == call.file)
+                .collect();
+            let targets: Vec<&Symbol> = if same_file.is_empty() {
+                candidates.clone()
+            } else {
+                same_file
+            };
+
+            for callee in targets {
+                let callee_id = Self::def_id(&callee.file, &callee.name, callee.start_line);
+                if callee_id == call.caller_id {
+                    continue; // drop self-loops
+                }
+                if seen.insert((call.caller_id.clone(), callee_id.clone())) {
+                    batch.edges.push(Edge {
+                        from: call.caller_id.clone(),
+                        to: callee_id,
+                        kind: EdgeKind::Calls,
+                    });
+                }
+            }
+        }
+
         batch
     }
 }
 
-/// The storage seam. The concrete implementation (LadybugDB via `lbug`) lands in
-/// Slice 2b; keeping callers behind this trait isolates the FFI/cmake boundary
-/// and keeps the backend swappable.
+/// The storage seam. The concrete implementation (LadybugDB via `lbug`) lives
+/// in `store.rs`; keeping callers behind this trait isolates the FFI/cmake
+/// boundary and keeps the backend swappable.
 #[allow(dead_code)]
 pub trait Store {
     /// Create node/edge tables and indexes if absent.

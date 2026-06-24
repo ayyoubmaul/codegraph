@@ -1,10 +1,11 @@
-//! LadybugDB-backed implementation of the graph [`Store`].
+//! LadybugDB-backed implementation of the graph [`Store`], plus structural
+//! queries (`who_calls`, `call_chain`).
 //!
 //! Holds a `Database` and opens a short-lived `Connection` per operation: a
 //! `Connection<'a>` borrows the `Database`, so storing both in one struct would
 //! be self-referential. Writes run inside a single transaction using prepared
-//! statements (LadybugDB serializes writers — the parse stage is what we
-//! parallelize, the write stage is batched).
+//! statements (LadybugDB serializes writers — we parallelize the parse stage,
+//! batch the write stage).
 
 use std::path::Path;
 
@@ -14,6 +15,14 @@ use crate::graph::{EdgeKind, GraphBatch, NodeKind, Store};
 
 pub struct LadybugStore {
     db: Database,
+}
+
+/// A definition row returned by a query.
+#[derive(Debug)]
+pub struct DefHit {
+    pub name: String,
+    pub file: String,
+    pub start_line: i64,
 }
 
 impl LadybugStore {
@@ -30,13 +39,50 @@ impl LadybugStore {
         Connection::new(&self.db).map_err(|e| anyhow::anyhow!("lbug connect: {e}"))
     }
 
-    /// `(files, defs, defines_edges)` currently stored — used to verify a write.
-    pub fn summary(&self) -> anyhow::Result<(u64, u64, u64)> {
+    /// `(files, defs, defines_edges, calls_edges)` currently stored.
+    pub fn summary(&self) -> anyhow::Result<(u64, u64, u64, u64)> {
         Ok((
             self.count("MATCH (:File) RETURN count(*)")?,
             self.count("MATCH (:Def) RETURN count(*)")?,
             self.count("MATCH (:File)-[r:Defines]->(:Def) RETURN count(r)")?,
+            self.count("MATCH (:Def)-[r:Calls]->(:Def) RETURN count(r)")?,
         ))
+    }
+
+    /// Direct callers of any definition named `name`.
+    pub fn who_calls(&self, name: &str) -> anyhow::Result<Vec<DefHit>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "MATCH (caller:Def)-[:Calls]->(callee:Def {name: $name}) \
+                 RETURN DISTINCT caller.name, caller.file, caller.start_line \
+                 ORDER BY caller.file, caller.start_line",
+            )
+            .map_err(|e| anyhow::anyhow!("lbug prepare who_calls: {e}"))?;
+        let result = conn
+            .execute(&mut stmt, vec![("name", Value::String(name.to_string()))])
+            .map_err(|e| anyhow::anyhow!("lbug who_calls: {e}"))?;
+        Ok(result.filter_map(row_to_hit).collect())
+    }
+
+    /// Definitions transitively reachable from `name` via `Calls`, up to `depth`
+    /// hops (clamped to 1..=10).
+    pub fn call_chain(&self, name: &str, depth: u8) -> anyhow::Result<Vec<DefHit>> {
+        let depth = depth.clamp(1, 10);
+        let conn = self.connect()?;
+        // `depth` is a validated integer, safe to interpolate; `name` is a param.
+        let query = format!(
+            "MATCH (:Def {{name: $name}})-[:Calls*1..{depth}]->(d:Def) \
+             RETURN DISTINCT d.name, d.file, d.start_line \
+             ORDER BY d.file, d.start_line"
+        );
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|e| anyhow::anyhow!("lbug prepare call_chain: {e}"))?;
+        let result = conn
+            .execute(&mut stmt, vec![("name", Value::String(name.to_string()))])
+            .map_err(|e| anyhow::anyhow!("lbug call_chain: {e}"))?;
+        Ok(result.filter_map(row_to_hit).collect())
     }
 
     fn count(&self, query: &str) -> anyhow::Result<u64> {
@@ -59,6 +105,7 @@ impl Store for LadybugStore {
             "CREATE NODE TABLE IF NOT EXISTS Def(id STRING, name STRING, kind STRING, \
              file STRING, start_line INT64, end_line INT64, PRIMARY KEY(id))",
             "CREATE REL TABLE IF NOT EXISTS Defines(FROM File TO Def)",
+            "CREATE REL TABLE IF NOT EXISTS Calls(FROM Def TO Def)",
         ] {
             conn.query(ddl)
                 .map_err(|e| anyhow::anyhow!("lbug schema `{ddl}`: {e}"))?;
@@ -83,6 +130,9 @@ impl Store for LadybugStore {
         let mut defines_stmt = conn
             .prepare("MATCH (f:File {path: $file}), (d:Def {id: $id}) MERGE (f)-[:Defines]->(d)")
             .map_err(|e| anyhow::anyhow!("lbug prepare defines: {e}"))?;
+        let mut calls_stmt = conn
+            .prepare("MATCH (a:Def {id: $from}), (b:Def {id: $to}) MERGE (a)-[:Calls]->(b)")
+            .map_err(|e| anyhow::anyhow!("lbug prepare calls: {e}"))?;
 
         for node in &batch.nodes {
             match node.kind {
@@ -109,15 +159,28 @@ impl Store for LadybugStore {
         }
 
         for edge in &batch.edges {
-            if matches!(edge.kind, EdgeKind::Defines) {
-                conn.execute(
-                    &mut defines_stmt,
-                    vec![
-                        ("file", Value::String(edge.from.clone())),
-                        ("id", Value::String(edge.to.clone())),
-                    ],
-                )
-                .map_err(|e| anyhow::anyhow!("lbug insert defines: {e}"))?;
+            match edge.kind {
+                EdgeKind::Defines => {
+                    conn.execute(
+                        &mut defines_stmt,
+                        vec![
+                            ("file", Value::String(edge.from.clone())),
+                            ("id", Value::String(edge.to.clone())),
+                        ],
+                    )
+                    .map_err(|e| anyhow::anyhow!("lbug insert defines: {e}"))?;
+                }
+                EdgeKind::Calls => {
+                    conn.execute(
+                        &mut calls_stmt,
+                        vec![
+                            ("from", Value::String(edge.from.clone())),
+                            ("to", Value::String(edge.to.clone())),
+                        ],
+                    )
+                    .map_err(|e| anyhow::anyhow!("lbug insert calls: {e}"))?;
+                }
+                EdgeKind::Imports => {}
             }
         }
 
@@ -140,4 +203,25 @@ impl Store for LadybugStore {
             .map_err(|e| anyhow::anyhow!("lbug del file: {e}"))?;
         Ok(())
     }
+}
+
+fn row_to_hit(row: Vec<Value>) -> Option<DefHit> {
+    let mut it = row.into_iter();
+    let name = match it.next()? {
+        Value::String(s) => s,
+        _ => return None,
+    };
+    let file = match it.next()? {
+        Value::String(s) => s,
+        _ => return None,
+    };
+    let start_line = match it.next()? {
+        Value::Int64(n) => n,
+        _ => 0,
+    };
+    Some(DefHit {
+        name,
+        file,
+        start_line,
+    })
 }

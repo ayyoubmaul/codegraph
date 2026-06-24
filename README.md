@@ -47,8 +47,9 @@ Vertical slices, each one builds and runs:
 - [x] **Slice 2b — LadybugDB store.** `LadybugStore` persists the batch via
       `lbug` (schema + `MERGE` writes in a transaction) with a Cypher count
       read-back. `index --db <path>`; idempotent, on-disk.
-- [ ] **Slice 2c — graph queries.** Extract `CALLS`/`IMPORTS` edges; Cypher
-      `who_calls` / `call_chain` as query commands.
+- [x] **Slice 2c — call edges + queries.** Extract `Calls` edges (name-based
+      resolution, same-file preferred) and Cypher-backed `who-calls` /
+      `call-chain` commands. *(`Imports` edges + type-aware resolution: later.)*
 - [ ] **Slice 3 — semantic.** Embed symbols with fastembed → Kùzu HNSW;
       hybrid query (vector recall → graph expansion).
 - [ ] **Slice 4 — incremental.** `notify` watcher patches the graph in-place.
