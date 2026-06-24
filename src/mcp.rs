@@ -214,19 +214,22 @@ pub async fn serve(db: &Path) -> anyhow::Result<()> {
 /// Serve over stdio while a background thread watches `repo` and keeps the
 /// shared store fresh. The initial index completes before serving begins.
 pub async fn serve_watch(db: &Path, repo: &Path, embed: bool) -> anyhow::Result<()> {
-    let mut store = LadybugStore::open(db)?;
-    let mut embedder: Option<Embedder> = None;
-    let (root, cache) = crate::watch::index_once_owned(repo, &mut store, &mut embedder, embed)?;
-    let vindex = crate::vector::build_from_store(&store)?;
+    let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(LadybugStore::open(db)?));
+    let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
+    let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(None));
 
-    let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
-    let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(embedder));
-    let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(vindex));
-
-    let (s2, e2, v2) = (store.clone(), embedder.clone(), vindex.clone());
+    // Index + watch on a background thread so the MCP server starts answering
+    // immediately (no startup index → no handshake timeout). Tools return
+    // partial results until the initial index completes, then full + live.
+    let (s2, e2, v2, repo) = (
+        store.clone(),
+        embedder.clone(),
+        vindex.clone(),
+        repo.to_path_buf(),
+    );
     std::thread::spawn(move || {
-        if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed, Some(v2)) {
-            eprintln!("codegraph: watcher stopped: {e}");
+        if let Err(e) = crate::watch::index_and_watch(&repo, s2, e2, v2, embed) {
+            eprintln!("codegraph: index/watch stopped: {e}");
         }
     });
 

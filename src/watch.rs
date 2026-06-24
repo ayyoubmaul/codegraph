@@ -71,6 +71,66 @@ pub fn index_once_owned(
     Ok((root, cache))
 }
 
+/// Full index into an *already-shared* store, then watch — all on a background
+/// thread so the server can start serving immediately (no startup blocking, no
+/// MCP handshake timeout). Uses `blocking_lock`, so must run off the async
+/// runtime (a dedicated `std::thread`).
+pub fn index_and_watch(
+    root: &Path,
+    store: SharedStore,
+    embedder: SharedEmbedder,
+    vindex: SharedVector,
+    embed_on: bool,
+) -> anyhow::Result<()> {
+    let root = root.canonicalize()?;
+
+    let mut cache: Cache = HashMap::new();
+    for sf in walk::collect_files(&root) {
+        if let Ok(src) = std::fs::read(&sf.path) {
+            if let Ok(pr) = parse::parse_file(&sf.rel, &src, sf.lang) {
+                cache.insert(sf.rel.clone(), pr);
+            }
+        }
+    }
+    let batch = build_full(&cache);
+
+    {
+        let mut s = store.blocking_lock();
+        if s.def_count()? == 0 {
+            let tmp = std::env::temp_dir().join(format!("codegraph-bulk-{}", std::process::id()));
+            s.bulk_load(&batch, &tmp)?;
+            let _ = std::fs::remove_dir_all(&tmp);
+        } else {
+            s.write_batch(&batch)?;
+        }
+    }
+
+    if embed_on {
+        let already = store.blocking_lock().embedded_ids()?;
+        let items = {
+            let mut guard = embedder.blocking_lock();
+            if guard.is_none() {
+                *guard = Some(Embedder::new()?);
+            }
+            embed::embed_defs(guard.as_mut().unwrap(), &batch, &already)?
+        };
+        if !items.is_empty() {
+            store.blocking_lock().set_embeddings(&items)?;
+        }
+    }
+
+    {
+        let built = {
+            let s = store.blocking_lock();
+            crate::vector::build_from_store(&s)?
+        };
+        *vindex.blocking_lock() = built;
+    }
+
+    eprintln!("codegraph: initial index complete ({} files)", cache.len());
+    watch_only(root, cache, store, embedder, embed_on, Some(vindex))
+}
+
 /// Watch `root` and patch the shared store on each change. Runs on a plain OS
 /// thread (uses `blocking_lock`), so it must NOT be called inside the async
 /// runtime.

@@ -33,29 +33,29 @@ pub async fn serve(
     watch: Option<&Path>,
     embed: bool,
 ) -> anyhow::Result<()> {
-    let mut store = LadybugStore::open(db)?;
-    let mut embedder: Option<Embedder> = None;
-    let watcher = match watch {
-        Some(repo) => Some(crate::watch::index_once_owned(
-            repo,
-            &mut store,
-            &mut embedder,
-            embed,
-        )?),
-        None => None,
+    let store = LadybugStore::open(db)?;
+    // Without --watch, build the vector index now from the existing db.
+    let vindex_built = if watch.is_none() {
+        crate::vector::build_from_store(&store)?
+    } else {
+        None
     };
 
-    let vindex_built = crate::vector::build_from_store(&store)?;
-
     let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
-    let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(embedder));
+    let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
     let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(vindex_built));
 
-    if let Some((root, cache)) = watcher {
-        let (s2, e2, v2) = (store.clone(), embedder.clone(), vindex.clone());
+    // With --watch, index + watch on a background thread so the UI serves now.
+    if let Some(repo) = watch {
+        let (s2, e2, v2, repo) = (
+            store.clone(),
+            embedder.clone(),
+            vindex.clone(),
+            repo.to_path_buf(),
+        );
         std::thread::spawn(move || {
-            if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed, Some(v2)) {
-                eprintln!("codegraph: watcher stopped: {e}");
+            if let Err(e) = crate::watch::index_and_watch(&repo, s2, e2, v2, embed) {
+                eprintln!("codegraph: index/watch stopped: {e}");
             }
         });
     }
