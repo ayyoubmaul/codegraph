@@ -272,6 +272,77 @@ impl LadybugStore {
             .collect())
     }
 
+    /// Number of definition nodes (used to detect a fresh database).
+    pub fn def_count(&self) -> anyhow::Result<u64> {
+        self.count("MATCH (:Def) RETURN count(*)")
+    }
+
+    /// Bulk-load a batch into EMPTY tables via CSV `COPY` — the fast path for a
+    /// fresh index. Writes temp CSVs under `tmp_dir`. `COPY` runs once per table,
+    /// so callers use this only when the database is empty.
+    pub fn bulk_load(&self, batch: &GraphBatch, tmp_dir: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(tmp_dir)?;
+        let mut file_csv = String::new();
+        let mut def_csv = String::new();
+        let mut defines_csv = String::new();
+        let mut calls_csv = String::new();
+        let mut imports_csv = String::new();
+
+        for n in &batch.nodes {
+            match n.kind {
+                NodeKind::File => {
+                    file_csv.push_str(&csv_field(&n.id));
+                    file_csv.push('\n');
+                }
+                NodeKind::Definition => {
+                    let kind = n.symbol_kind.map(|k| format!("{k:?}")).unwrap_or_default();
+                    def_csv.push_str(&format!(
+                        "{},{},{},{},{},{}\n",
+                        csv_field(&n.id),
+                        csv_field(&n.name),
+                        csv_field(&kind),
+                        csv_field(&n.file),
+                        n.start_line,
+                        n.end_line
+                    ));
+                }
+            }
+        }
+        for e in &batch.edges {
+            let line = format!("{},{}\n", csv_field(&e.from), csv_field(&e.to));
+            match e.kind {
+                EdgeKind::Defines => defines_csv.push_str(&line),
+                EdgeKind::Calls => calls_csv.push_str(&line),
+                EdgeKind::Imports => imports_csv.push_str(&line),
+            }
+        }
+
+        self.copy_csv(tmp_dir, "file.csv", &file_csv, "COPY File FROM '{path}'")?;
+        self.copy_csv(
+            tmp_dir,
+            "def.csv",
+            &def_csv,
+            "COPY Def (id, name, kind, file, start_line, end_line) FROM '{path}'",
+        )?;
+        self.copy_csv(tmp_dir, "defines.csv", &defines_csv, "COPY Defines FROM '{path}'")?;
+        self.copy_csv(tmp_dir, "calls.csv", &calls_csv, "COPY Calls FROM '{path}'")?;
+        self.copy_csv(tmp_dir, "imports.csv", &imports_csv, "COPY Imports FROM '{path}'")?;
+        Ok(())
+    }
+
+    fn copy_csv(&self, tmp: &Path, name: &str, content: &str, tmpl: &str) -> anyhow::Result<()> {
+        if content.is_empty() {
+            return Ok(());
+        }
+        let path = tmp.join(name);
+        std::fs::write(&path, content)?;
+        let query = tmpl.replace("{path}", &path.to_string_lossy());
+        let conn = self.connect()?;
+        conn.query(&query)
+            .map_err(|e| anyhow::anyhow!("lbug bulk `{query}`: {e}"))?;
+        Ok(())
+    }
+
     /// All definitions with their metadata (for the UI graph).
     pub fn graph_nodes(&self) -> anyhow::Result<Vec<GraphNode>> {
         let conn = self.connect()?;
@@ -459,6 +530,11 @@ fn row_to_hit(row: Vec<Value>) -> Option<DefHit> {
         file,
         start_line,
     })
+}
+
+/// CSV-quote a field (wrap in quotes, double internal quotes) for `COPY`.
+fn csv_field(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 fn as_string(v: Value) -> Option<String> {

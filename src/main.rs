@@ -105,7 +105,14 @@ fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Res
     if let Some(db_path) = db {
         let persist_start = Instant::now();
         let mut store = store::LadybugStore::open(db_path)?;
-        store.write_batch(&batch)?;
+        // Fresh DB → fast bulk CSV load; existing DB → incremental MERGE.
+        if store.def_count()? == 0 {
+            let tmp = std::env::temp_dir().join(format!("codegraph-bulk-{}", std::process::id()));
+            store.bulk_load(&batch, &tmp)?;
+            let _ = std::fs::remove_dir_all(&tmp);
+        } else {
+            store.write_batch(&batch)?;
+        }
 
         if embed {
             let embed_start = Instant::now();
