@@ -71,6 +71,37 @@ pub enum Command {
         depth: u8,
     },
 
+    /// Compute graph intelligence (PageRank importance + Louvain communities)
+    /// and store it on the graph.
+    Analyze {
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// PageRank iterations.
+        #[arg(long, default_value_t = 30)]
+        iters: usize,
+    },
+
+    /// Show the most important (most-depended-on) definitions, by PageRank.
+    Important {
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// Number of results.
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+    },
+
+    /// Show the largest code communities (modules) found by Louvain.
+    Communities {
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// How many communities to show.
+        #[arg(long, default_value_t = 6)]
+        k: usize,
+    },
+
     /// Watch a repository and incrementally patch the graph as files change.
     Watch {
         /// Path to the repository root.

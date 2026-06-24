@@ -4,6 +4,7 @@
 //! extract definitions. Graph store (Kùzu), semantic embeddings (fastembed),
 //! incremental watch (notify), and the MCP server (rmcp) land in later slices.
 
+mod analyze;
 mod cli;
 mod embed;
 mod graph;
@@ -42,6 +43,9 @@ fn main() -> anyhow::Result<()> {
         Command::Search { query, db, k } => search(&query, &db, k),
         Command::WhoCalls { name, db } => who_calls(&name, &db),
         Command::CallChain { name, db, depth } => call_chain(&name, &db, depth),
+        Command::Analyze { db, iters } => analyze_cmd(&db, iters),
+        Command::Important { db, k } => important(&db, k),
+        Command::Communities { db, k } => communities(&db, k),
         Command::Watch { path, db, embed } => watch::run(&path, &db, embed),
     }
 }
@@ -163,6 +167,58 @@ fn search(query: &str, db: &Path, k: usize) -> anyhow::Result<()> {
         for (h, sim) in hits {
             println!("  {sim:.3}  {:<28} {}:{}", h.name, h.file, h.start_line);
         }
+    }
+    Ok(())
+}
+
+fn analyze_cmd(db: &Path, iters: usize) -> anyhow::Result<()> {
+    let mut store = store::LadybugStore::open(db)?;
+    let start = Instant::now();
+    let (defs, communities) = analyze::run(&mut store, iters)?;
+    println!(
+        "analyzed {defs} defs → {communities} communities + PageRank in {:.2?}",
+        start.elapsed()
+    );
+    Ok(())
+}
+
+fn important(db: &Path, k: usize) -> anyhow::Result<()> {
+    let store = store::LadybugStore::open(db)?;
+    let hits = store.top_important(k)?;
+    if hits.is_empty() {
+        println!("no analysis yet — run `analyze` first");
+    } else {
+        println!("top {} most-depended-on definitions:", hits.len());
+        for (h, pr) in hits {
+            println!("  {pr:.4}  {:<28} {}:{}", h.name, h.file, h.start_line);
+        }
+    }
+    Ok(())
+}
+
+fn communities(db: &Path, k: usize) -> anyhow::Result<()> {
+    let store = store::LadybugStore::open(db)?;
+    let members = store.community_members()?;
+    if members.is_empty() {
+        println!("no analysis yet — run `analyze` first");
+        return Ok(());
+    }
+
+    // Members arrive ordered by (community, pagerank desc); group consecutively.
+    let mut groups: Vec<(i64, Vec<String>)> = Vec::new();
+    for (c, hit, _pr) in members {
+        match groups.last_mut() {
+            Some(last) if last.0 == c => last.1.push(hit.name),
+            _ => groups.push((c, vec![hit.name])),
+        }
+    }
+    groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+    let show = k.min(groups.len());
+    println!("{} communities (top {show} by size):", groups.len());
+    for (c, names) in groups.into_iter().take(show) {
+        let sample: Vec<&str> = names.iter().take(6).map(String::as_str).collect();
+        println!("  community {c}: {} defs — {}", names.len(), sample.join(", "));
     }
     Ok(())
 }

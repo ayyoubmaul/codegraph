@@ -133,6 +133,134 @@ impl LadybugStore {
         Ok(result.filter_map(row_to_hit_score).collect())
     }
 
+    /// All definition ids (so isolated defs are included in analysis).
+    pub fn def_ids(&self) -> anyhow::Result<Vec<String>> {
+        let conn = self.connect()?;
+        let result = conn
+            .query("MATCH (d:Def) RETURN d.id")
+            .map_err(|e| anyhow::anyhow!("lbug def_ids: {e}"))?;
+        Ok(result
+            .filter_map(|row| match row.into_iter().next()? {
+                Value::String(s) => Some(s),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// All `Calls` edges as `(caller_id, callee_id)` pairs.
+    pub fn call_edges(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.connect()?;
+        let result = conn
+            .query("MATCH (a:Def)-[:Calls]->(b:Def) RETURN a.id, b.id")
+            .map_err(|e| anyhow::anyhow!("lbug call_edges: {e}"))?;
+        Ok(result
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                let a = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                let b = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                Some((a, b))
+            })
+            .collect())
+    }
+
+    /// Store `(def_id, pagerank, community)` analysis results.
+    pub fn set_analysis(&mut self, items: &[(String, f64, i64)]) -> anyhow::Result<()> {
+        let conn = self.connect()?;
+        conn.query("BEGIN TRANSACTION")
+            .map_err(|e| anyhow::anyhow!("lbug begin: {e}"))?;
+        let mut stmt = conn
+            .prepare("MATCH (d:Def {id: $id}) SET d.pagerank = $pr, d.community = $c")
+            .map_err(|e| anyhow::anyhow!("lbug prepare set_analysis: {e}"))?;
+        for (id, pr, c) in items {
+            conn.execute(
+                &mut stmt,
+                vec![
+                    ("id", Value::String(id.clone())),
+                    ("pr", Value::Double(*pr)),
+                    ("c", Value::Int64(*c)),
+                ],
+            )
+            .map_err(|e| anyhow::anyhow!("lbug set_analysis `{id}`: {e}"))?;
+        }
+        conn.query("COMMIT")
+            .map_err(|e| anyhow::anyhow!("lbug commit: {e}"))?;
+        Ok(())
+    }
+
+    /// The `k` most important definitions by PageRank (with their score).
+    pub fn top_important(&self, k: usize) -> anyhow::Result<Vec<(DefHit, f32)>> {
+        let k = k.clamp(1, 200);
+        let conn = self.connect()?;
+        let mut result = conn
+            .query(&format!(
+                "MATCH (d:Def) WHERE d.pagerank IS NOT NULL \
+                 RETURN d.name, d.file, d.start_line, d.pagerank \
+                 ORDER BY d.pagerank DESC LIMIT {k}"
+            ))
+            .map_err(|e| anyhow::anyhow!("lbug top_important: {e}"))?;
+        let mut out = Vec::new();
+        while let Some(row) = result.next() {
+            if let Some(hit) = row_to_hit_score(row) {
+                out.push(hit);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every analyzed definition as `(community, def, pagerank)`, ordered by
+    /// community then importance.
+    pub fn community_members(&self) -> anyhow::Result<Vec<(i64, DefHit, f64)>> {
+        let conn = self.connect()?;
+        let result = conn
+            .query(
+                "MATCH (d:Def) WHERE d.community IS NOT NULL \
+                 RETURN d.community, d.name, d.file, d.start_line, d.pagerank \
+                 ORDER BY d.community, d.pagerank DESC",
+            )
+            .map_err(|e| anyhow::anyhow!("lbug community_members: {e}"))?;
+        Ok(result
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                let community = match it.next()? {
+                    Value::Int64(n) => n,
+                    _ => return None,
+                };
+                let name = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                let file = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                let start_line = match it.next()? {
+                    Value::Int64(n) => n,
+                    _ => 0,
+                };
+                let pr = match it.next()? {
+                    Value::Double(f) => f,
+                    Value::Float(f) => f as f64,
+                    _ => 0.0,
+                };
+                Some((
+                    community,
+                    DefHit {
+                        name,
+                        file,
+                        start_line,
+                    },
+                    pr,
+                ))
+            })
+            .collect())
+    }
+
     fn count(&self, query: &str) -> anyhow::Result<u64> {
         let conn = self.connect()?;
         let mut result = conn
@@ -152,7 +280,7 @@ impl Store for LadybugStore {
             "CREATE NODE TABLE IF NOT EXISTS File(path STRING, PRIMARY KEY(path))",
             "CREATE NODE TABLE IF NOT EXISTS Def(id STRING, name STRING, kind STRING, \
              file STRING, start_line INT64, end_line INT64, embedding FLOAT[384], \
-             PRIMARY KEY(id))",
+             pagerank DOUBLE, community INT64, PRIMARY KEY(id))",
             "CREATE REL TABLE IF NOT EXISTS Defines(FROM File TO Def)",
             "CREATE REL TABLE IF NOT EXISTS Calls(FROM Def TO Def)",
             "CREATE REL TABLE IF NOT EXISTS Imports(FROM File TO File)",

@@ -64,10 +64,11 @@ Vertical slices, each one builds and runs:
       sub-graph incident to it (incoming + outgoing edges) — never a full
       reindex. Verified live: adding a function updates `who-calls` instantly.
       *(per-change in-memory rebuild + event debouncing: optimize later.)*
-- [ ] **Slice 5 — graph intelligence.** Community detection (**Louvain**) +
-      importance (**PageRank**) via LadybugDB's `algo` extension; store a
-      `community` / `rank` on each `Def`. Surfaces module clusters,
-      architectural boundaries, and most-depended-on code.
+- [x] **Slice 5 — graph intelligence.** `analyze` computes **PageRank**
+      importance + **Louvain** communities in Rust over the call graph (the
+      `algo` extension loads over the network → would break offline), storing
+      `pagerank`/`community` on each `Def`. `important` + `communities` commands.
+      Verified on sieve (recovered the auth/cache/proxy/semantic-cache modules).
 - [ ] **Slice 6 — MCP server.** Expose `search`, `who-calls`, `call-chain`,
       `definition`, `neighbors`, `impact-of`, `communities` over rmcp/stdio.
 
