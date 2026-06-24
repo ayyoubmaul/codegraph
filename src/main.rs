@@ -8,6 +8,7 @@ mod cli;
 mod graph;
 mod lang;
 mod parse;
+mod store;
 mod symbol;
 mod walk;
 
@@ -19,6 +20,7 @@ use clap::Parser;
 use rayon::prelude::*;
 
 use cli::{Cli, Command};
+use graph::Store;
 use symbol::Symbol;
 
 fn main() -> anyhow::Result<()> {
@@ -29,11 +31,11 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Index { path, json } => index(&path, json),
+        Command::Index { path, json, db } => index(&path, json, db.as_deref()),
     }
 }
 
-fn index(root: &Path, json: bool) -> anyhow::Result<()> {
+fn index(root: &Path, json: bool, db: Option<&Path>) -> anyhow::Result<()> {
     let start = Instant::now();
 
     let files = walk::collect_files(root);
@@ -49,9 +51,21 @@ fn index(root: &Path, json: bool) -> anyhow::Result<()> {
         })
         .collect();
 
-    // Assemble the graph batch that a Store will persist in Slice 2b.
+    // Assemble the graph batch and (optionally) persist it to LadybugDB.
     let batch = graph::GraphBatch::build(&rel_paths, &symbols);
     let elapsed = start.elapsed();
+
+    if let Some(db_path) = db {
+        let persist_start = Instant::now();
+        let mut store = store::LadybugStore::open(db_path)?;
+        store.write_batch(&batch)?;
+        let (files, defs, defines) = store.summary()?;
+        println!(
+            "persisted to {} → {files} files, {defs} defs, {defines} defines edges in {:.2?}",
+            db_path.display(),
+            persist_start.elapsed()
+        );
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&batch)?);

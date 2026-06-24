@@ -23,8 +23,12 @@ pub enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
 
-        /// Emit every extracted symbol as JSON instead of a summary.
+        /// Emit the graph batch as JSON instead of a summary.
         #[arg(long)]
         json: bool,
+
+        /// Persist the graph to a LadybugDB database at this path.
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
 }
