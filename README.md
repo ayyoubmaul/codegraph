@@ -59,8 +59,11 @@ Vertical slices, each one builds and runs:
       KNN via the built-in `array_cosine_similarity` — **no extension, fully
       offline, one engine**. Verified on sieve (finds code by meaning).
       *(HNSW extension = scale-only; auto vector→graph "hybrid" combine = next.)*
-- [ ] **Slice 4 — incremental.** `notify` watcher re-parses only changed files
-      and patches the graph in-place (never stale).
+- [x] **Slice 4 — incremental.** `watch <path> --db` (`notify`): re-parses only
+      the changed file, rebuilds resolution in memory, and rewrites just the
+      sub-graph incident to it (incoming + outgoing edges) — never a full
+      reindex. Verified live: adding a function updates `who-calls` instantly.
+      *(per-change in-memory rebuild + event debouncing: optimize later.)*
 - [ ] **Slice 5 — graph intelligence.** Community detection (**Louvain**) +
       importance (**PageRank**) via LadybugDB's `algo` extension; store a
       `community` / `rank` on each `Def`. Surfaces module clusters,

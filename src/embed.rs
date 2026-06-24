@@ -6,6 +6,8 @@
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
+use crate::graph::{GraphBatch, NodeKind};
+
 /// Embedding dimensionality of the default model. Must match the `FLOAT[384]`
 /// column in the store schema (`store::LadybugStore::init_schema`).
 #[allow(dead_code)]
@@ -41,4 +43,33 @@ impl Embedder {
         out.pop()
             .ok_or_else(|| anyhow::anyhow!("embedder returned no vector"))
     }
+}
+
+/// Build the `(def_id, embedding)` pairs for every definition node in `batch`.
+/// The embedded text is `"{Kind} {name}"`, which the model maps to meaning.
+pub fn embed_defs(
+    embedder: &mut Embedder,
+    batch: &GraphBatch,
+) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+    let defs: Vec<(String, String)> = batch
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Definition)
+        .map(|n| {
+            let text = match n.symbol_kind {
+                Some(k) => format!("{k:?} {}", n.name),
+                None => n.name.clone(),
+            };
+            (n.id.clone(), text)
+        })
+        .collect();
+    if defs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let vectors = embedder.embed_batch(defs.iter().map(|(_, t)| t.clone()).collect())?;
+    Ok(defs
+        .into_iter()
+        .zip(vectors)
+        .map(|((id, _), v)| (id, v))
+        .collect())
 }

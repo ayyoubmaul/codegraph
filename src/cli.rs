@@ -70,4 +70,17 @@ pub enum Command {
         #[arg(long, default_value_t = 3)]
         depth: u8,
     },
+
+    /// Watch a repository and incrementally patch the graph as files change.
+    Watch {
+        /// Path to the repository root.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// Also keep embeddings updated (loads the model).
+        #[arg(long)]
+        embed: bool,
+    },
 }

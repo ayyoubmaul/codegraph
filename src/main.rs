@@ -12,6 +12,7 @@ mod parse;
 mod store;
 mod symbol;
 mod walk;
+mod watch;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,6 +42,7 @@ fn main() -> anyhow::Result<()> {
         Command::Search { query, db, k } => search(&query, &db, k),
         Command::WhoCalls { name, db } => who_calls(&name, &db),
         Command::CallChain { name, db, depth } => call_chain(&name, &db, depth),
+        Command::Watch { path, db, embed } => watch::run(&path, &db, embed),
     }
 }
 
@@ -79,26 +81,9 @@ fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Res
         store.write_batch(&batch)?;
 
         if embed {
-            let defs: Vec<(String, String)> = batch
-                .nodes
-                .iter()
-                .filter(|n| n.kind == graph::NodeKind::Definition)
-                .map(|n| {
-                    let text = match n.symbol_kind {
-                        Some(k) => format!("{k:?} {}", n.name),
-                        None => n.name.clone(),
-                    };
-                    (n.id.clone(), text)
-                })
-                .collect();
             let embed_start = Instant::now();
             let mut embedder = embed::Embedder::new()?;
-            let vectors = embedder.embed_batch(defs.iter().map(|(_, t)| t.clone()).collect())?;
-            let items: Vec<(String, Vec<f32>)> = defs
-                .into_iter()
-                .zip(vectors)
-                .map(|((id, _), v)| (id, v))
-                .collect();
+            let items = embed::embed_defs(&mut embedder, &batch)?;
             let n = items.len();
             store.set_embeddings(&items)?;
             println!("embedded {n} definitions in {:.2?}", embed_start.elapsed());
