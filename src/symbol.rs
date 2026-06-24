@@ -27,4 +27,7 @@ pub struct Symbol {
     /// 1-based, inclusive line range.
     pub start_line: usize,
     pub end_line: usize,
+    /// For methods/associated fns: the type they belong to (for type-aware
+    /// call resolution). `None` for free functions.
+    pub owner: Option<String>,
 }

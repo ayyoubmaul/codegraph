@@ -103,21 +103,64 @@ impl Lang {
     /// Extract `(callee_name, is_method)` from a call node's `function` field,
     /// unwrapping method/field/scoped access to the final identifier.
     /// `is_method` is true for receiver-style calls (`x.foo()`).
-    pub fn callee_name_of(self, call_node: Node, source: &[u8]) -> Option<(String, bool)> {
+    /// `(callee_name, is_method, receiver_text)`. `receiver_text` is the object
+    /// the method is called on (`self`/`this`/a variable/a qualifier), used for
+    /// type-aware resolution.
+    pub fn callee_name_of(
+        self,
+        call_node: Node,
+        source: &[u8],
+    ) -> Option<(String, bool, Option<String>)> {
         let func = call_node.child_by_field_name("function")?;
-        let (name_node, is_method) = match func.kind() {
+        let (name_node, is_method, recv) = match func.kind() {
             "identifier" | "field_identifier" | "property_identifier" | "type_identifier" => {
-                (func, false)
+                (func, false, None)
             }
-            "field_expression" => (func.child_by_field_name("field")?, true), // Rust  a.b()
-            "selector_expression" => (func.child_by_field_name("field")?, true), // Go  pkg.F()
-            "member_expression" => (func.child_by_field_name("property")?, true), // JS/TS a.b()
-            "attribute" => (func.child_by_field_name("attribute")?, true),    // Python a.b()
-            "scoped_identifier" => (func.child_by_field_name("name")?, false), // Rust a::b()
+            "field_expression" => (
+                func.child_by_field_name("field")?,
+                true,
+                func.child_by_field_name("value"),
+            ), // Rust a.b()
+            "selector_expression" => (
+                func.child_by_field_name("field")?,
+                true,
+                func.child_by_field_name("operand"),
+            ), // Go pkg.F()
+            "member_expression" => (
+                func.child_by_field_name("property")?,
+                true,
+                func.child_by_field_name("object"),
+            ), // JS/TS a.b()
+            "attribute" => (
+                func.child_by_field_name("attribute")?,
+                true,
+                func.child_by_field_name("object"),
+            ), // Python a.b()
+            "scoped_identifier" => (
+                func.child_by_field_name("name")?,
+                false,
+                func.child_by_field_name("path"),
+            ), // Rust a::b()
             _ => return None,
         };
         let name = name_node.utf8_text(source).ok()?.to_string();
-        Some((name, is_method))
+        let receiver = recv
+            .and_then(|n| n.utf8_text(source).ok())
+            .map(|s| s.to_string());
+        Some((name, is_method, receiver))
+    }
+
+    /// If this node defines a type that owns methods, its type name (generics
+    /// stripped). Used to tag methods with their owner type.
+    pub fn type_container_name(self, node: Node, source: &[u8]) -> Option<String> {
+        let name_node = match node.kind() {
+            "impl_item" => node.child_by_field_name("type")?, // Rust  impl T
+            "class_declaration" => node.child_by_field_name("name")?, // TS/JS class T
+            "class_definition" => node.child_by_field_name("name")?, // Python class T
+            _ => return None,
+        };
+        let text = name_node.utf8_text(source).ok()?;
+        Some(text.split('<').next().unwrap_or(text).trim().to_string())
     }
 
     /// Is this node an import/use statement?

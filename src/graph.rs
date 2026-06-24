@@ -62,6 +62,9 @@ pub struct CallRef {
     pub file: String,
     /// Was this a method-style call (`x.foo()`) vs a plain call (`foo()`)?
     pub is_method: bool,
+    /// Inferred receiver type (`self`/`this` → enclosing type) for type-aware
+    /// resolution; `None` if unknown.
+    pub receiver_type: Option<String>,
 }
 
 /// An import statement: `file` imports module/path `source` (raw, unresolved).
@@ -200,39 +203,53 @@ impl GraphBatch {
                 pool = candidates.clone();
             }
 
-            // Resolution tiers, most precise first: same-file → imported files
-            // → globally-unique name (confident even cross-repo) → same-repo
-            // (capped). Ambiguous, non-local names are dropped rather than
-            // fanned out across the whole workspace (which was pure noise).
-            let same_file: Vec<&Symbol> =
-                pool.iter().copied().filter(|s| s.file == call.file).collect();
-            let targets: Vec<&Symbol> = if !same_file.is_empty() {
-                same_file
+            // Type-aware tier first: a self/this/typed-receiver call resolves to
+            // a method on that exact owner type, if one exists.
+            let typed: Vec<&Symbol> = match &call.receiver_type {
+                Some(rt) => pool
+                    .iter()
+                    .copied()
+                    .filter(|s| s.owner.as_deref() == Some(rt.as_str()))
+                    .collect(),
+                None => Vec::new(),
+            };
+
+            // Otherwise scope tiers, most precise first: same-file → imported →
+            // globally-unique name (cross-repo ok) → same-repo (capped).
+            // Ambiguous, non-local names are dropped rather than fanned out.
+            let targets: Vec<&Symbol> = if !typed.is_empty() {
+                typed
             } else {
-                let imported: Vec<&Symbol> = imports_by_file
-                    .get(call.file.as_str())
-                    .map(|imps| {
-                        pool.iter()
-                            .copied()
-                            .filter(|s| imps.contains(s.file.as_str()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !imported.is_empty() {
-                    imported
-                } else if pool.len() == 1 {
-                    pool // globally unique name → confident, even across repos
+                let same_file: Vec<&Symbol> =
+                    pool.iter().copied().filter(|s| s.file == call.file).collect();
+                if !same_file.is_empty() {
+                    same_file
                 } else {
-                    let call_repo = repo_of(&call.file);
-                    let same_repo: Vec<&Symbol> = pool
-                        .iter()
-                        .copied()
-                        .filter(|s| repo_of(&s.file) == call_repo)
-                        .collect();
-                    if !same_repo.is_empty() && same_repo.len() <= MAX_AMBIGUOUS {
-                        same_repo
+                    let imported: Vec<&Symbol> = imports_by_file
+                        .get(call.file.as_str())
+                        .map(|imps| {
+                            pool.iter()
+                                .copied()
+                                .filter(|s| imps.contains(s.file.as_str()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !imported.is_empty() {
+                        imported
+                    } else if pool.len() == 1 {
+                        pool
                     } else {
-                        Vec::new() // too ambiguous and non-local → no edge
+                        let call_repo = repo_of(&call.file);
+                        let same_repo: Vec<&Symbol> = pool
+                            .iter()
+                            .copied()
+                            .filter(|s| repo_of(&s.file) == call_repo)
+                            .collect();
+                        if !same_repo.is_empty() && same_repo.len() <= MAX_AMBIGUOUS {
+                            same_repo
+                        } else {
+                            Vec::new()
+                        }
                     }
                 }
             };
