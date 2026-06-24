@@ -50,19 +50,27 @@ fn main() -> anyhow::Result<()> {
         Command::Important { db, k } => important(&db, k),
         Command::Communities { db, k } => communities(&db, k),
         Command::Watch { path, db, embed } => watch::run(&path, &db, embed),
-        Command::Serve { db } => serve_cmd(&db),
-        Command::Ui { db, port } => ui_cmd(&db, port),
+        Command::Serve { db, watch, embed } => serve_cmd(&db, watch.as_deref(), embed),
+        Command::Ui {
+            db,
+            port,
+            watch,
+            embed,
+        } => ui_cmd(&db, port, watch.as_deref(), embed),
     }
 }
 
-fn serve_cmd(db: &Path) -> anyhow::Result<()> {
+fn serve_cmd(db: &Path, watch: Option<&Path>, embed: bool) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(mcp::serve(db))
+    match watch {
+        Some(repo) => rt.block_on(mcp::serve_watch(db, repo, embed)),
+        None => rt.block_on(mcp::serve(db)),
+    }
 }
 
-fn ui_cmd(db: &Path, port: u16) -> anyhow::Result<()> {
+fn ui_cmd(db: &Path, port: u16, watch: Option<&Path>, embed: bool) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(ui::serve(db, port))
+    rt.block_on(ui::serve(db, port, watch, embed))
 }
 
 fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Result<()> {

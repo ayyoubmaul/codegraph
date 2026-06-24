@@ -1,17 +1,21 @@
 //! Incremental indexing: watch the repo and patch the graph per changed file.
 //!
-//! Keeps an in-memory per-file parse cache. On a change it re-parses only that
-//! file, rebuilds the (cheap) in-memory resolution over the full symbol set,
-//! then writes just the sub-graph *incident to that file* — its nodes plus every
-//! edge that touches them (incoming and outgoing) — after a `remove_file`. So
-//! only the changed file is re-parsed and re-written, but cross-file call edges
-//! stay correct (re-resolved against the whole repo).
+//! Used by the standalone `watch` command and by `serve --watch` / `ui --watch`,
+//! where the *same* shared store is also served. The store is held behind a
+//! `tokio::sync::Mutex` so async handlers can `.lock().await` it while this
+//! watcher thread `blocking_lock()`s it from a plain OS thread.
+//!
+//! Per change: re-parse only the changed file, rebuild resolution over the full
+//! symbol set in memory, then rewrite just the sub-graph incident to that file
+//! (its nodes + every edge touching them, incoming and outgoing).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::channel;
 
 use notify::{EventKind, RecursiveMode, Watcher};
+use tokio::sync::Mutex;
 
 use crate::embed::{self, Embedder};
 use crate::graph::{Edge, GraphBatch, Node, NodeKind, Store};
@@ -20,13 +24,30 @@ use crate::parse::{self, ParseResult};
 use crate::store::LadybugStore;
 use crate::walk;
 
-pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
-    let root = root.canonicalize()?;
-    let mut store = LadybugStore::open(db)?;
-    let mut embedder = if embed_on { Some(Embedder::new()?) } else { None };
+pub type Cache = HashMap<String, ParseResult>;
+pub type SharedStore = Arc<Mutex<LadybugStore>>;
+pub type SharedEmbedder = Arc<Mutex<Option<Embedder>>>;
 
-    // Initial full index into the cache and the database.
-    let mut cache: HashMap<String, ParseResult> = HashMap::new();
+/// Standalone `watch` command: own the store, index once, then watch forever.
+pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
+    let mut store = LadybugStore::open(db)?;
+    let mut embedder: Option<Embedder> = None;
+    let (root, cache) = index_once_owned(root, &mut store, &mut embedder, embed_on)?;
+    let store: SharedStore = Arc::new(Mutex::new(store));
+    let embedder: SharedEmbedder = Arc::new(Mutex::new(embedder));
+    watch_only(root, cache, store, embedder, embed_on)
+}
+
+/// Full index over an owned store (no locking) — used at startup before the
+/// store is shared. Returns the canonical root and the per-file parse cache.
+pub fn index_once_owned(
+    root: &Path,
+    store: &mut LadybugStore,
+    embedder: &mut Option<Embedder>,
+    embed_on: bool,
+) -> anyhow::Result<(PathBuf, Cache)> {
+    let root = root.canonicalize()?;
+    let mut cache: Cache = HashMap::new();
     for sf in walk::collect_files(&root) {
         if let Ok(src) = std::fs::read(&sf.path) {
             if let Ok(pr) = parse::parse_file(&sf.rel, &src, sf.lang) {
@@ -36,16 +57,28 @@ pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
     }
     let batch = build_full(&cache);
     store.write_batch(&batch)?;
-    if let Some(emb) = embedder.as_mut() {
-        let items = embed::embed_defs(emb, &batch)?;
+    if embed_on {
+        if embedder.is_none() {
+            *embedder = Some(Embedder::new()?);
+        }
+        let items = embed::embed_defs(embedder.as_mut().unwrap(), &batch)?;
         store.set_embeddings(&items)?;
     }
-    println!(
-        "indexed {} files → watching {} (Ctrl-C to stop)",
-        cache.len(),
-        root.display()
-    );
+    eprintln!("codegraph: indexed {} files", cache.len());
+    Ok((root, cache))
+}
 
+/// Watch `root` and patch the shared store on each change. Runs on a plain OS
+/// thread (uses `blocking_lock`), so it must NOT be called inside the async
+/// runtime.
+pub fn watch_only(
+    root: PathBuf,
+    mut cache: Cache,
+    store: SharedStore,
+    embedder: SharedEmbedder,
+    embed_on: bool,
+) -> anyhow::Result<()> {
+    eprintln!("codegraph: watching {}", root.display());
     let (tx, rx) = channel();
     let mut watcher = notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
@@ -68,10 +101,14 @@ pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
                     };
                     let rel = stripped.to_string_lossy().replace('\\', "/");
                     if !path.exists() {
-                        remove(&mut store, &mut cache, &rel)?;
+                        remove(&store, &mut cache, &rel);
                         continue;
                     }
-                    update_file(&mut store, &mut cache, &rel, lang, path, embedder.as_mut())?;
+                    if let Err(e) =
+                        update_file(&store, &embedder, &mut cache, &rel, lang, path, embed_on)
+                    {
+                        eprintln!("codegraph: update {rel} failed: {e}");
+                    }
                 }
             }
             EventKind::Remove(_) => {
@@ -83,7 +120,7 @@ pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
                         continue;
                     };
                     let rel = stripped.to_string_lossy().replace('\\', "/");
-                    remove(&mut store, &mut cache, &rel)?;
+                    remove(&store, &mut cache, &rel);
                 }
             }
             _ => {}
@@ -92,25 +129,23 @@ pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn remove(
-    store: &mut LadybugStore,
-    cache: &mut HashMap<String, ParseResult>,
-    rel: &str,
-) -> anyhow::Result<()> {
+fn remove(store: &SharedStore, cache: &mut Cache, rel: &str) {
     if cache.remove(rel).is_some() {
-        store.remove_file(rel)?;
-        println!("- {rel}");
+        match store.blocking_lock().remove_file(rel) {
+            Ok(()) => eprintln!("- {rel}"),
+            Err(e) => eprintln!("codegraph: remove {rel} failed: {e}"),
+        }
     }
-    Ok(())
 }
 
 fn update_file(
-    store: &mut LadybugStore,
-    cache: &mut HashMap<String, ParseResult>,
+    store: &SharedStore,
+    embedder: &SharedEmbedder,
+    cache: &mut Cache,
     rel: &str,
     lang: Lang,
     path: &Path,
-    embedder: Option<&mut Embedder>,
+    embed_on: bool,
 ) -> anyhow::Result<()> {
     let Ok(src) = std::fs::read(path) else {
         return Ok(());
@@ -128,17 +163,28 @@ fn update_file(
         .filter(|n| n.kind == NodeKind::Definition)
         .count();
 
-    store.remove_file(rel)?;
-    store.write_batch(&sub)?;
-    if let Some(emb) = embedder {
-        let items = embed::embed_defs(emb, &sub)?;
-        store.set_embeddings(&items)?;
+    {
+        let mut s = store.blocking_lock();
+        s.remove_file(rel)?;
+        s.write_batch(&sub)?;
     }
-    println!("~ {rel} ({n_defs} defs)");
+    if embed_on {
+        let items = {
+            let mut guard = embedder.blocking_lock();
+            if guard.is_none() {
+                *guard = Some(Embedder::new()?);
+            }
+            embed::embed_defs(guard.as_mut().unwrap(), &sub)?
+        };
+        if !items.is_empty() {
+            store.blocking_lock().set_embeddings(&items)?;
+        }
+    }
+    eprintln!("~ {rel} ({n_defs} defs)");
     Ok(())
 }
 
-fn build_full(cache: &HashMap<String, ParseResult>) -> GraphBatch {
+fn build_full(cache: &Cache) -> GraphBatch {
     let mut files = Vec::new();
     let mut symbols = Vec::new();
     let mut calls = Vec::new();
@@ -152,10 +198,9 @@ fn build_full(cache: &HashMap<String, ParseResult>) -> GraphBatch {
     GraphBatch::build(&files, &symbols, &calls, &imports)
 }
 
-/// The sub-batch of nodes/edges incident to `rel`: its File node, its Def
-/// nodes, and every edge touching one of them (incoming + outgoing). Endpoint
-/// nodes in other files already exist in the DB, so the MATCH-based edge writes
-/// still resolve.
+/// Nodes/edges incident to `rel`: its File node, its Def nodes, and every edge
+/// touching them (incoming + outgoing). Endpoint nodes in other files already
+/// exist in the DB, so the MATCH-based edge writes still resolve.
 fn sub_batch_for_file(batch: &GraphBatch, rel: &str) -> GraphBatch {
     let def_prefix = format!("{rel}#");
     let touches = |id: &str| id == rel || id.starts_with(&def_prefix);

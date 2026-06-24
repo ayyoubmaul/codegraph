@@ -120,6 +120,12 @@ pub enum Command {
         /// LadybugDB database path.
         #[arg(long)]
         db: PathBuf,
+        /// Also watch this repo and keep the index live while serving.
+        #[arg(long)]
+        watch: Option<PathBuf>,
+        /// Keep embeddings fresh while watching (requires --watch).
+        #[arg(long)]
+        embed: bool,
     },
 
     /// Launch the web UI to explore the graph in a browser.
@@ -130,5 +136,11 @@ pub enum Command {
         /// Port to serve on.
         #[arg(long, default_value_t = 7700)]
         port: u16,
+        /// Also watch this repo and keep the index live while serving.
+        #[arg(long)]
+        watch: Option<PathBuf>,
+        /// Keep embeddings fresh while watching (requires --watch).
+        #[arg(long)]
+        embed: bool,
     },
 }

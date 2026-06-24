@@ -66,6 +66,19 @@ impl CodegraphServer {
         }
     }
 
+    /// Build from an already-shared store + embedder, so a background watcher
+    /// can patch the same store this server queries.
+    pub fn with_shared(
+        store: Arc<Mutex<LadybugStore>>,
+        embedder: Arc<Mutex<Option<Embedder>>>,
+    ) -> Self {
+        Self {
+            store,
+            embedder,
+            tool_router: Self::tool_router(),
+        }
+    }
+
     #[tool(
         description = "Semantic search: find definitions by meaning, not just name (e.g. 'rate limiting logic'). Returns ranked name, location, and similarity."
     )]
@@ -189,6 +202,30 @@ fn format_hits(hits: &[DefHit], name: &str, label: &str) -> String {
 pub async fn serve(db: &Path) -> anyhow::Result<()> {
     let store = LadybugStore::open(db)?;
     let service = CodegraphServer::new(store).serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
+/// Serve over stdio while a background thread watches `repo` and keeps the
+/// shared store fresh. The initial index completes before serving begins.
+pub async fn serve_watch(db: &Path, repo: &Path, embed: bool) -> anyhow::Result<()> {
+    let mut store = LadybugStore::open(db)?;
+    let mut embedder: Option<Embedder> = None;
+    let (root, cache) = crate::watch::index_once_owned(repo, &mut store, &mut embedder, embed)?;
+
+    let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
+    let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(embedder));
+
+    let (s2, e2) = (store.clone(), embedder.clone());
+    std::thread::spawn(move || {
+        if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed) {
+            eprintln!("codegraph: watcher stopped: {e}");
+        }
+    });
+
+    let service = CodegraphServer::with_shared(store, embedder)
+        .serve(stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }

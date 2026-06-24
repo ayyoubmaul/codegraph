@@ -20,17 +20,43 @@ use crate::graph::GraphBatch;
 use crate::store::LadybugStore;
 
 struct AppState {
-    store: Mutex<LadybugStore>,
-    embedder: Mutex<Option<Embedder>>,
+    store: Arc<Mutex<LadybugStore>>,
+    embedder: Arc<Mutex<Option<Embedder>>>,
 }
 
-/// Open the database and serve the web UI until interrupted.
-pub async fn serve(db: &Path, port: u16) -> anyhow::Result<()> {
-    let store = LadybugStore::open(db)?;
-    let state = Arc::new(AppState {
-        store: Mutex::new(store),
-        embedder: Mutex::new(None),
-    });
+/// Open the database and serve the web UI until interrupted. With `watch`, also
+/// index that repo and keep it live in a background thread sharing the store.
+pub async fn serve(
+    db: &Path,
+    port: u16,
+    watch: Option<&Path>,
+    embed: bool,
+) -> anyhow::Result<()> {
+    let mut store = LadybugStore::open(db)?;
+    let mut embedder: Option<Embedder> = None;
+    let watcher = match watch {
+        Some(repo) => Some(crate::watch::index_once_owned(
+            repo,
+            &mut store,
+            &mut embedder,
+            embed,
+        )?),
+        None => None,
+    };
+
+    let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
+    let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(embedder));
+
+    if let Some((root, cache)) = watcher {
+        let (s2, e2) = (store.clone(), embedder.clone());
+        std::thread::spawn(move || {
+            if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed) {
+                eprintln!("codegraph: watcher stopped: {e}");
+            }
+        });
+    }
+
+    let state = Arc::new(AppState { store, embedder });
 
     let app = Router::new()
         .route("/", get(index))

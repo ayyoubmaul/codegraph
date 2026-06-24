@@ -78,6 +78,11 @@ Vertical slices, each one builds and runs:
       Louvain community, sized by PageRank, with a semantic-search highlight and
       click-to-see callers/callees. Verified: serves the page + `/api/graph`
       (185 nodes / 364 edges, each with community + pagerank).
+- [x] **Slice 8 — live serve.** `serve --watch <repo>` / `ui --watch <repo>`:
+      one process indexes, watches, and serves — a background thread patches the
+      same in-process store the server queries (no second process, no lock
+      conflict). Verified live: an edit propagated to `/api/graph` (2→3 nodes)
+      with no restart.
 
 ## Build & use
 
@@ -105,6 +110,13 @@ claude mcp add codegraph -- /abs/path/to/codegraph serve --db /abs/path/to/graph
 ```
 
 Tools exposed: `search` (by meaning), `who_calls`, `call_chain`, `important`.
+
+For a **live** index that updates as you edit, add `--watch <repo>` (and
+`--embed` to keep semantic search fresh) — one process serves *and* watches:
+
+```bash
+claude mcp add codegraph -- /abs/codegraph serve --db /abs/graph.db --watch /abs/repo --embed
+```
 
 ## Prerequisites
 
