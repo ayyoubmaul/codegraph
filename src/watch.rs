@@ -22,6 +22,7 @@ use crate::graph::{Edge, GraphBatch, Node, NodeKind, Store};
 use crate::lang::Lang;
 use crate::parse::{self, ParseResult};
 use crate::store::LadybugStore;
+use crate::vector::SharedVector;
 use crate::walk;
 
 pub type Cache = HashMap<String, ParseResult>;
@@ -35,7 +36,8 @@ pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
     let (root, cache) = index_once_owned(root, &mut store, &mut embedder, embed_on)?;
     let store: SharedStore = Arc::new(Mutex::new(store));
     let embedder: SharedEmbedder = Arc::new(Mutex::new(embedder));
-    watch_only(root, cache, store, embedder, embed_on)
+    // Standalone watch serves nothing, so there's no in-memory vector index.
+    watch_only(root, cache, store, embedder, embed_on, None)
 }
 
 /// Full index over an owned store (no locking) — used at startup before the
@@ -78,6 +80,7 @@ pub fn watch_only(
     store: SharedStore,
     embedder: SharedEmbedder,
     embed_on: bool,
+    vindex: Option<SharedVector>,
 ) -> anyhow::Result<()> {
     eprintln!("codegraph: watching {}", root.display());
     let (tx, rx) = channel();
@@ -105,9 +108,16 @@ pub fn watch_only(
                         remove(&store, &mut cache, &rel);
                         continue;
                     }
-                    if let Err(e) =
-                        update_file(&store, &embedder, &mut cache, &rel, lang, path, embed_on)
-                    {
+                    if let Err(e) = update_file(
+                        &store,
+                        &embedder,
+                        &mut cache,
+                        &rel,
+                        lang,
+                        path,
+                        embed_on,
+                        vindex.as_ref(),
+                    ) {
                         eprintln!("codegraph: update {rel} failed: {e}");
                     }
                 }
@@ -147,6 +157,7 @@ fn update_file(
     lang: Lang,
     path: &Path,
     embed_on: bool,
+    vindex: Option<&SharedVector>,
 ) -> anyhow::Result<()> {
     let Ok(src) = std::fs::read(path) else {
         return Ok(());
@@ -182,6 +193,14 @@ fn update_file(
         };
         if !items.is_empty() {
             store.blocking_lock().set_embeddings(&items)?;
+            if let Some(vi) = vindex {
+                let mut guard = vi.blocking_lock();
+                if let Some(idx) = guard.as_mut() {
+                    for (id, vec) in &items {
+                        idx.add(id, vec);
+                    }
+                }
+            }
         }
     }
     eprintln!("~ {rel} ({n_defs} defs)");

@@ -88,6 +88,12 @@ Vertical slices, each one builds and runs:
       instead of per-row `MERGE`; (c) `--embed` caches by def id, so re-index
       skips already-embedded defs (full re-embed → instant). Index a big monorepo
       or a parent folder of repos without the file/embedding count exploding.
+- [x] **Slice 10 — HNSW vector search.** The MCP/UI servers build an in-memory
+      HNSW index (pure-Rust `hnsw_rs`) from the stored embeddings at startup, so
+      semantic search is ~O(log n) instead of brute-force O(n); results join
+      metadata back from the graph DB, and the live watcher adds new vectors.
+      Falls back to brute-force when no index. Verified: HNSW results match
+      brute-force on sieve. (CLI one-shot `search` stays brute-force.)
 
 ## Build & use
 

@@ -14,6 +14,7 @@ mod parse;
 mod store;
 mod symbol;
 mod ui;
+mod vector;
 mod walk;
 mod watch;
 

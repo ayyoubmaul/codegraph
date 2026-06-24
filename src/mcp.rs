@@ -20,6 +20,7 @@ use crate::store::{DefHit, LadybugStore};
 pub struct CodegraphServer {
     store: Arc<Mutex<LadybugStore>>,
     embedder: Arc<Mutex<Option<Embedder>>>,
+    vindex: crate::vector::SharedVector,
     // Consumed by the `#[tool_handler]` macro expansion.
     #[allow(dead_code)]
     tool_router: ToolRouter<CodegraphServer>,
@@ -58,23 +59,27 @@ struct TopKArgs {
 
 #[tool_router]
 impl CodegraphServer {
-    pub fn new(store: LadybugStore) -> Self {
-        Self {
+    pub fn new(store: LadybugStore) -> anyhow::Result<Self> {
+        let vindex = crate::vector::build_from_store(&store)?;
+        Ok(Self {
             store: Arc::new(Mutex::new(store)),
             embedder: Arc::new(Mutex::new(None)),
+            vindex: Arc::new(Mutex::new(vindex)),
             tool_router: Self::tool_router(),
-        }
+        })
     }
 
-    /// Build from an already-shared store + embedder, so a background watcher
-    /// can patch the same store this server queries.
+    /// Build from an already-shared store + embedder + vector index, so a
+    /// background watcher can patch the same state this server queries.
     pub fn with_shared(
         store: Arc<Mutex<LadybugStore>>,
         embedder: Arc<Mutex<Option<Embedder>>>,
+        vindex: crate::vector::SharedVector,
     ) -> Self {
         Self {
             store,
             embedder,
+            vindex,
             tool_router: Self::tool_router(),
         }
     }
@@ -99,8 +104,8 @@ impl CodegraphServer {
         };
         let hits = {
             let store = self.store.lock().await;
-            store
-                .semantic_search(&query_vec, args.k.unwrap_or(8))
+            let vindex = self.vindex.lock().await;
+            crate::vector::hybrid_search(&store, vindex.as_ref(), &query_vec, args.k.unwrap_or(8))
                 .map_err(internal)?
         };
         let mut out = String::new();
@@ -201,7 +206,7 @@ fn format_hits(hits: &[DefHit], name: &str, label: &str) -> String {
 /// disconnects.
 pub async fn serve(db: &Path) -> anyhow::Result<()> {
     let store = LadybugStore::open(db)?;
-    let service = CodegraphServer::new(store).serve(stdio()).await?;
+    let service = CodegraphServer::new(store)?.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
@@ -212,18 +217,20 @@ pub async fn serve_watch(db: &Path, repo: &Path, embed: bool) -> anyhow::Result<
     let mut store = LadybugStore::open(db)?;
     let mut embedder: Option<Embedder> = None;
     let (root, cache) = crate::watch::index_once_owned(repo, &mut store, &mut embedder, embed)?;
+    let vindex = crate::vector::build_from_store(&store)?;
 
     let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
     let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(embedder));
+    let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(vindex));
 
-    let (s2, e2) = (store.clone(), embedder.clone());
+    let (s2, e2, v2) = (store.clone(), embedder.clone(), vindex.clone());
     std::thread::spawn(move || {
-        if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed) {
+        if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed, Some(v2)) {
             eprintln!("codegraph: watcher stopped: {e}");
         }
     });
 
-    let service = CodegraphServer::with_shared(store, embedder)
+    let service = CodegraphServer::with_shared(store, embedder, vindex)
         .serve(stdio())
         .await?;
     service.waiting().await?;

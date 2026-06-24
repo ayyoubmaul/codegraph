@@ -18,7 +18,7 @@ pub struct LadybugStore {
 }
 
 /// A definition row returned by a query.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DefHit {
     pub name: String,
     pub file: String,
@@ -356,6 +356,86 @@ impl LadybugStore {
         conn.query(&query)
             .map_err(|e| anyhow::anyhow!("lbug bulk `{query}`: {e}"))?;
         Ok(())
+    }
+
+    /// Every stored embedding as `(def_id, vector)` — used to build the HNSW
+    /// vector index in memory.
+    pub fn all_embeddings(&self) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+        let conn = self.connect()?;
+        let result = conn
+            .query("MATCH (d:Def) WHERE d.embedding IS NOT NULL RETURN d.id, d.embedding")
+            .map_err(|e| anyhow::anyhow!("lbug all_embeddings: {e}"))?;
+        Ok(result
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                let id = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                let vec = match it.next()? {
+                    Value::Array(_, elems) | Value::List(_, elems) => elems
+                        .into_iter()
+                        .filter_map(|v| match v {
+                            Value::Float(f) => Some(f),
+                            Value::Double(d) => Some(d as f32),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => return None,
+                };
+                Some((id, vec))
+            })
+            .collect())
+    }
+
+    /// Fetch metadata for a set of def ids (for joining HNSW results).
+    pub fn def_hits_by_ids(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, DefHit>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.connect()?;
+        let list = Value::List(
+            LogicalType::String,
+            ids.iter().map(|s| Value::String(s.clone())).collect(),
+        );
+        let mut stmt = conn
+            .prepare("MATCH (d:Def) WHERE d.id IN $ids RETURN d.id, d.name, d.file, d.start_line")
+            .map_err(|e| anyhow::anyhow!("lbug prepare def_hits_by_ids: {e}"))?;
+        let result = conn
+            .execute(&mut stmt, vec![("ids", list)])
+            .map_err(|e| anyhow::anyhow!("lbug def_hits_by_ids: {e}"))?;
+        Ok(result
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                let id = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                let name = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                let file = match it.next()? {
+                    Value::String(s) => s,
+                    _ => return None,
+                };
+                let start_line = match it.next()? {
+                    Value::Int64(n) => n,
+                    _ => 0,
+                };
+                Some((
+                    id,
+                    DefHit {
+                        name,
+                        file,
+                        start_line,
+                    },
+                ))
+            })
+            .collect())
     }
 
     /// All definitions with their metadata (for the UI graph).

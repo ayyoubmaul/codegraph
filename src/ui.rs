@@ -22,6 +22,7 @@ use crate::store::LadybugStore;
 struct AppState {
     store: Arc<Mutex<LadybugStore>>,
     embedder: Arc<Mutex<Option<Embedder>>>,
+    vindex: crate::vector::SharedVector,
 }
 
 /// Open the database and serve the web UI until interrupted. With `watch`, also
@@ -44,19 +45,26 @@ pub async fn serve(
         None => None,
     };
 
+    let vindex_built = crate::vector::build_from_store(&store)?;
+
     let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
     let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(embedder));
+    let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(vindex_built));
 
     if let Some((root, cache)) = watcher {
-        let (s2, e2) = (store.clone(), embedder.clone());
+        let (s2, e2, v2) = (store.clone(), embedder.clone(), vindex.clone());
         std::thread::spawn(move || {
-            if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed) {
+            if let Err(e) = crate::watch::watch_only(root, cache, s2, e2, embed, Some(v2)) {
                 eprintln!("codegraph: watcher stopped: {e}");
             }
         });
     }
 
-    let state = Arc::new(AppState { store, embedder });
+    let state = Arc::new(AppState {
+        store,
+        embedder,
+        vindex,
+    });
 
     let app = Router::new()
         .route("/", get(index))
@@ -119,7 +127,8 @@ async fn search(
     };
     let hits = {
         let store = state.store.lock().await;
-        store.semantic_search(&query_vec, p.k.unwrap_or(15))?
+        let vindex = state.vindex.lock().await;
+        crate::vector::hybrid_search(&store, vindex.as_ref(), &query_vec, p.k.unwrap_or(15))?
     };
     let hits: Vec<_> = hits
         .iter()
