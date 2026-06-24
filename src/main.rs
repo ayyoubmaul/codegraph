@@ -55,22 +55,24 @@ fn index(root: &Path, json: bool, db: Option<&Path>) -> anyhow::Result<()> {
 
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut calls: Vec<graph::CallRef> = Vec::new();
+    let mut imports: Vec<graph::ImportRef> = Vec::new();
     for p in parsed {
         symbols.extend(p.symbols);
         calls.extend(p.calls);
+        imports.extend(p.imports);
     }
 
     // Assemble the graph batch and (optionally) persist it to LadybugDB.
-    let batch = graph::GraphBatch::build(&rel_paths, &symbols, &calls);
+    let batch = graph::GraphBatch::build(&rel_paths, &symbols, &calls, &imports);
     let elapsed = start.elapsed();
 
     if let Some(db_path) = db {
         let persist_start = Instant::now();
         let mut store = store::LadybugStore::open(db_path)?;
         store.write_batch(&batch)?;
-        let (files, defs, defines, calls) = store.summary()?;
+        let (files, defs, defines, calls, imports) = store.summary()?;
         println!(
-            "persisted to {} → {files} files, {defs} defs, {defines} defines, {calls} calls in {:.2?}",
+            "persisted to {} → {files} files, {defs} defs, {defines} defines, {calls} calls, {imports} imports in {:.2?}",
             db_path.display(),
             persist_start.elapsed()
         );

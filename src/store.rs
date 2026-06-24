@@ -39,13 +39,14 @@ impl LadybugStore {
         Connection::new(&self.db).map_err(|e| anyhow::anyhow!("lbug connect: {e}"))
     }
 
-    /// `(files, defs, defines_edges, calls_edges)` currently stored.
-    pub fn summary(&self) -> anyhow::Result<(u64, u64, u64, u64)> {
+    /// `(files, defs, defines, calls, imports)` currently stored.
+    pub fn summary(&self) -> anyhow::Result<(u64, u64, u64, u64, u64)> {
         Ok((
             self.count("MATCH (:File) RETURN count(*)")?,
             self.count("MATCH (:Def) RETURN count(*)")?,
             self.count("MATCH (:File)-[r:Defines]->(:Def) RETURN count(r)")?,
             self.count("MATCH (:Def)-[r:Calls]->(:Def) RETURN count(r)")?,
+            self.count("MATCH (:File)-[r:Imports]->(:File) RETURN count(r)")?,
         ))
     }
 
@@ -106,6 +107,7 @@ impl Store for LadybugStore {
              file STRING, start_line INT64, end_line INT64, PRIMARY KEY(id))",
             "CREATE REL TABLE IF NOT EXISTS Defines(FROM File TO Def)",
             "CREATE REL TABLE IF NOT EXISTS Calls(FROM Def TO Def)",
+            "CREATE REL TABLE IF NOT EXISTS Imports(FROM File TO File)",
         ] {
             conn.query(ddl)
                 .map_err(|e| anyhow::anyhow!("lbug schema `{ddl}`: {e}"))?;
@@ -133,6 +135,9 @@ impl Store for LadybugStore {
         let mut calls_stmt = conn
             .prepare("MATCH (a:Def {id: $from}), (b:Def {id: $to}) MERGE (a)-[:Calls]->(b)")
             .map_err(|e| anyhow::anyhow!("lbug prepare calls: {e}"))?;
+        let mut imports_stmt = conn
+            .prepare("MATCH (a:File {path: $from}), (b:File {path: $to}) MERGE (a)-[:Imports]->(b)")
+            .map_err(|e| anyhow::anyhow!("lbug prepare imports: {e}"))?;
 
         for node in &batch.nodes {
             match node.kind {
@@ -180,7 +185,16 @@ impl Store for LadybugStore {
                     )
                     .map_err(|e| anyhow::anyhow!("lbug insert calls: {e}"))?;
                 }
-                EdgeKind::Imports => {}
+                EdgeKind::Imports => {
+                    conn.execute(
+                        &mut imports_stmt,
+                        vec![
+                            ("from", Value::String(edge.from.clone())),
+                            ("to", Value::String(edge.to.clone())),
+                        ],
+                    )
+                    .map_err(|e| anyhow::anyhow!("lbug insert imports: {e}"))?;
+                }
             }
         }
 

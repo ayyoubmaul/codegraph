@@ -50,8 +50,10 @@ Vertical slices, each one builds and runs:
 - [x] **Slice 2c — call edges + queries.** Extract `Calls` edges (name-based
       resolution, same-file preferred) and Cypher-backed `who-calls` /
       `call-chain` commands. *(`Imports` edges + type-aware resolution: later.)*
-- [ ] **Slice 2d — imports + sharper resolution.** `Imports` edges; type-aware
-      call resolution to cut the same-name conflation from 2c.
+- [x] **Slice 2d — imports + sharper resolution.** `Imports` edges (relative
+      JS/TS resolution) + receiver-aware, import-scoped call resolution
+      (same-file → imported → repo-wide). *(Go/Rust module-path imports and true
+      type inference still future.)*
 - [ ] **Slice 3 — semantic (flagship of the bet).** Embed symbols with
       `fastembed` (local, offline) → LadybugDB `vector` extension (HNSW); hybrid
       query: vector recall by *meaning* → structural graph expansion.

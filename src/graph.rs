@@ -41,27 +41,34 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
-/// The kinds of relationship we record. `Imports` is populated in a later slice.
+/// The kinds of relationship we record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum EdgeKind {
     /// A file defines a symbol.
     Defines,
     /// A definition calls another definition.
     Calls,
-    /// A file imports another module/file.
+    /// A file imports another file.
     Imports,
 }
 
 /// An unresolved call site: a caller definition invoking a callee *by name*.
-/// `graph::GraphBatch::build` resolves the name to one or more definitions.
 #[derive(Debug, Clone)]
 pub struct CallRef {
     pub caller_id: String,
     pub callee_name: String,
-    /// File the call occurs in (used to prefer same-file resolution).
+    /// File the call occurs in (used to prefer same-file/imported resolution).
     pub file: String,
+    /// Was this a method-style call (`x.foo()`) vs a plain call (`foo()`)?
+    pub is_method: bool,
+}
+
+/// An import statement: `file` imports module/path `source` (raw, unresolved).
+#[derive(Debug, Clone)]
+pub struct ImportRef {
+    pub file: String,
+    pub source: String,
 }
 
 /// The unit of work written to a [`Store`]: everything extracted in one pass.
@@ -77,14 +84,20 @@ impl GraphBatch {
         format!("{file}#{name}@{start_line}")
     }
 
-    /// Build a batch from discovered files, their definitions, and call sites.
+    /// Build a batch from discovered files, definitions, call sites, and imports.
     ///
-    /// Nodes: one `File` per file, one `Definition` per symbol. Edges: a
-    /// `Defines` edge file→def, and `Calls` edges resolved name-based. Call
-    /// resolution prefers a same-file definition of that name; otherwise it
-    /// links to every repo-wide definition with the name (imprecise by design —
-    /// type-aware resolution is future work). Self-loops are dropped.
-    pub fn build(files: &[String], symbols: &[Symbol], calls: &[CallRef]) -> GraphBatch {
+    /// Nodes: one `File` per file, one `Definition` per symbol. Edges: `Defines`
+    /// (file→def), `Imports` (file→file, resolved for relative JS/TS sources),
+    /// and `Calls` (def→def). Call resolution is receiver-aware (method calls
+    /// prefer `Method` defs, plain calls prefer non-method) and locality-scoped
+    /// (same-file → imported files → repo-wide). Imprecise by design — true
+    /// type inference is future work. Self-loops are dropped.
+    pub fn build(
+        files: &[String],
+        symbols: &[Symbol],
+        calls: &[CallRef],
+        imports: &[ImportRef],
+    ) -> GraphBatch {
         let mut batch = GraphBatch::default();
 
         for file in files {
@@ -117,7 +130,31 @@ impl GraphBatch {
             });
         }
 
-        // Resolve call sites to Def→Def `Calls` edges.
+        // Imports: resolve relative (JS/TS) sources to File nodes.
+        let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
+        let mut imports_by_file: HashMap<&str, HashSet<String>> = HashMap::new();
+        let mut import_seen: HashSet<(String, String)> = HashSet::new();
+        for imp in imports {
+            let Some(target) = resolve_relative_import(&imp.file, &imp.source, &file_set) else {
+                continue;
+            };
+            if target == imp.file {
+                continue;
+            }
+            imports_by_file
+                .entry(imp.file.as_str())
+                .or_default()
+                .insert(target.clone());
+            if import_seen.insert((imp.file.clone(), target.clone())) {
+                batch.edges.push(Edge {
+                    from: imp.file.clone(),
+                    to: target,
+                    kind: EdgeKind::Imports,
+                });
+            }
+        }
+
+        // Calls: name index, then receiver-aware + locality-scoped resolution.
         let mut by_name: HashMap<&str, Vec<&Symbol>> = HashMap::new();
         for s in symbols {
             by_name.entry(s.name.as_str()).or_default().push(s);
@@ -128,15 +165,37 @@ impl GraphBatch {
             let Some(candidates) = by_name.get(call.callee_name.as_str()) else {
                 continue;
             };
-            let same_file: Vec<&Symbol> = candidates
+
+            // Receiver/kind preference; fall back to all if it empties the set.
+            let mut pool: Vec<&Symbol> = candidates
                 .iter()
                 .copied()
-                .filter(|s| s.file == call.file)
+                .filter(|s| {
+                    if call.is_method {
+                        s.kind == SymbolKind::Method
+                    } else {
+                        s.kind != SymbolKind::Method
+                    }
+                })
                 .collect();
-            let targets: Vec<&Symbol> = if same_file.is_empty() {
-                candidates.clone()
-            } else {
+            if pool.is_empty() {
+                pool = candidates.clone();
+            }
+
+            // Locality tiers: same-file → imported files → repo-wide.
+            let same_file: Vec<&Symbol> =
+                pool.iter().copied().filter(|s| s.file == call.file).collect();
+            let targets: Vec<&Symbol> = if !same_file.is_empty() {
                 same_file
+            } else if let Some(imported) = imports_by_file.get(call.file.as_str()) {
+                let in_imports: Vec<&Symbol> = pool
+                    .iter()
+                    .copied()
+                    .filter(|s| imported.contains(s.file.as_str()))
+                    .collect();
+                if in_imports.is_empty() { pool } else { in_imports }
+            } else {
+                pool
             };
 
             for callee in targets {
@@ -156,6 +215,55 @@ impl GraphBatch {
 
         batch
     }
+}
+
+/// Resolve a relative import (`./x`, `../lib/x`) against the importing file's
+/// directory, probing common extensions and index files. Returns the matched
+/// repo-relative path, or `None` for non-relative or unresolved imports.
+fn resolve_relative_import(
+    importing_file: &str,
+    source: &str,
+    files: &HashSet<&str>,
+) -> Option<String> {
+    if !(source.starts_with("./") || source.starts_with("../")) {
+        return None;
+    }
+    let dir = importing_file
+        .rfind('/')
+        .map(|i| &importing_file[..i])
+        .unwrap_or("");
+    let mut parts: Vec<&str> = if dir.is_empty() {
+        Vec::new()
+    } else {
+        dir.split('/').collect()
+    };
+    for seg in source.split('/') {
+        match seg {
+            "." | "" => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    let base = parts.join("/");
+
+    if files.contains(base.as_str()) {
+        return Some(base);
+    }
+    for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py"] {
+        let cand = format!("{base}.{ext}");
+        if files.contains(cand.as_str()) {
+            return Some(cand);
+        }
+    }
+    for idx in ["index.ts", "index.tsx", "index.js", "index.jsx"] {
+        let cand = format!("{base}/{idx}");
+        if files.contains(cand.as_str()) {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 /// The storage seam. The concrete implementation (LadybugDB via `lbug`) lives

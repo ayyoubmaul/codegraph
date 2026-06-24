@@ -100,19 +100,55 @@ impl Lang {
         }
     }
 
-    /// Extract the callee name from a call node's `function` field, unwrapping
-    /// method/field/scoped access down to the final identifier.
-    pub fn callee_name_of(self, call_node: Node, source: &[u8]) -> Option<String> {
+    /// Extract `(callee_name, is_method)` from a call node's `function` field,
+    /// unwrapping method/field/scoped access to the final identifier.
+    /// `is_method` is true for receiver-style calls (`x.foo()`).
+    pub fn callee_name_of(self, call_node: Node, source: &[u8]) -> Option<(String, bool)> {
         let func = call_node.child_by_field_name("function")?;
-        let name_node = match func.kind() {
-            "identifier" | "field_identifier" | "property_identifier" | "type_identifier" => func,
-            "field_expression" => func.child_by_field_name("field")?, // Rust  a.b()
-            "selector_expression" => func.child_by_field_name("field")?, // Go  pkg.F()
-            "member_expression" => func.child_by_field_name("property")?, // JS/TS a.b()
-            "attribute" => func.child_by_field_name("attribute")?,     // Python a.b()
-            "scoped_identifier" => func.child_by_field_name("name")?,  // Rust  a::b()
+        let (name_node, is_method) = match func.kind() {
+            "identifier" | "field_identifier" | "property_identifier" | "type_identifier" => {
+                (func, false)
+            }
+            "field_expression" => (func.child_by_field_name("field")?, true), // Rust  a.b()
+            "selector_expression" => (func.child_by_field_name("field")?, true), // Go  pkg.F()
+            "member_expression" => (func.child_by_field_name("property")?, true), // JS/TS a.b()
+            "attribute" => (func.child_by_field_name("attribute")?, true),    // Python a.b()
+            "scoped_identifier" => (func.child_by_field_name("name")?, false), // Rust a::b()
             _ => return None,
         };
-        name_node.utf8_text(source).ok().map(|s| s.to_string())
+        let name = name_node.utf8_text(source).ok()?.to_string();
+        Some((name, is_method))
+    }
+
+    /// Is this node an import/use statement?
+    pub fn is_import_node(self, node_kind: &str) -> bool {
+        match self {
+            Lang::Python => node_kind == "import_statement" || node_kind == "import_from_statement",
+            Lang::Go => node_kind == "import_spec",
+            Lang::Rust => node_kind == "use_declaration",
+            Lang::TypeScript | Lang::Tsx | Lang::JavaScript => node_kind == "import_statement",
+        }
+    }
+
+    /// Extract the raw import source (module path / specifier), quotes stripped.
+    /// Resolution to a file happens in `graph::GraphBatch::build`.
+    pub fn import_source(self, node: Node, source: &[u8]) -> Option<String> {
+        let raw = match self {
+            Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
+                node.child_by_field_name("source")?.utf8_text(source).ok()?
+            }
+            Lang::Python => node
+                .child_by_field_name("module_name")
+                .or_else(|| node.child_by_field_name("name"))?
+                .utf8_text(source)
+                .ok()?,
+            Lang::Go => node
+                .child_by_field_name("path")
+                .or_else(|| node.named_child(0))?
+                .utf8_text(source)
+                .ok()?,
+            Lang::Rust => node.named_child(0)?.utf8_text(source).ok()?,
+        };
+        Some(raw.trim_matches(['"', '\'', '`']).to_string())
     }
 }

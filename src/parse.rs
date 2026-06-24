@@ -1,15 +1,15 @@
-//! Parse a single source file into definitions ([`Symbol`]) and unresolved
-//! call sites ([`CallRef`]).
+//! Parse a single source file into definitions ([`Symbol`]), unresolved call
+//! sites ([`CallRef`]), and import statements ([`ImportRef`]).
 //!
 //! A depth-first walk tracks the nearest enclosing definition: any node whose
 //! kind maps to a [`SymbolKind`] becomes a symbol and the enclosing scope for
 //! its descendants; any call node emits a `CallRef` from that enclosing
-//! definition to the callee name. Resolving names to definitions happens later,
-//! in `graph::GraphBatch::build`.
+//! definition; any import node emits an `ImportRef`. Name/import resolution
+//! happens later, in `graph::GraphBatch::build`.
 
 use tree_sitter::{Node, Parser};
 
-use crate::graph::{CallRef, GraphBatch};
+use crate::graph::{CallRef, GraphBatch, ImportRef};
 use crate::lang::Lang;
 use crate::symbol::Symbol;
 
@@ -18,9 +18,10 @@ use crate::symbol::Symbol;
 pub struct ParseResult {
     pub symbols: Vec<Symbol>,
     pub calls: Vec<CallRef>,
+    pub imports: Vec<ImportRef>,
 }
 
-/// Parse `source` of the given language into definitions and call sites.
+/// Parse `source` of the given language into definitions, calls, and imports.
 pub fn parse_file(rel_path: &str, source: &[u8], lang: Lang) -> anyhow::Result<ParseResult> {
     let mut parser = Parser::new();
     parser
@@ -43,8 +44,7 @@ fn collect(
     enclosing: Option<&str>,
     out: &mut ParseResult,
 ) {
-    // The definition (if any) that this node opens, becoming the scope for its
-    // descendants.
+    // The definition (if any) this node opens, becoming its descendants' scope.
     let mut opened_def: Option<String> = None;
 
     if let Some(kind) = lang.symbol_kind(node.kind()) {
@@ -63,13 +63,21 @@ fn collect(
         }
     } else if lang.is_call_node(node.kind()) {
         if let Some(caller) = enclosing {
-            if let Some(callee) = lang.callee_name_of(node, source) {
+            if let Some((callee, is_method)) = lang.callee_name_of(node, source) {
                 out.calls.push(CallRef {
                     caller_id: caller.to_string(),
                     callee_name: callee,
                     file: rel_path.to_string(),
+                    is_method,
                 });
             }
+        }
+    } else if lang.is_import_node(node.kind()) {
+        if let Some(src) = lang.import_source(node, source) {
+            out.imports.push(ImportRef {
+                file: rel_path.to_string(),
+                source: src,
+            });
         }
     }
 
