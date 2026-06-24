@@ -33,11 +33,11 @@ pub type SharedEmbedder = Arc<Mutex<Option<Embedder>>>;
 pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
     let mut store = LadybugStore::open(db)?;
     let mut embedder: Option<Embedder> = None;
-    let (root, cache) = index_once_owned(root, &mut store, &mut embedder, embed_on)?;
+    let (root, cache, repo) = index_once_owned(root, &mut store, &mut embedder, embed_on)?;
     let store: SharedStore = Arc::new(Mutex::new(store));
     let embedder: SharedEmbedder = Arc::new(Mutex::new(embedder));
     // Standalone watch serves nothing, so there's no in-memory vector index.
-    watch_only(root, cache, store, embedder, embed_on, None)
+    watch_only(root, cache, store, embedder, embed_on, None, repo)
 }
 
 /// Full index over an owned store (no locking) — used at startup before the
@@ -47,10 +47,11 @@ pub fn index_once_owned(
     store: &mut LadybugStore,
     embedder: &mut Option<Embedder>,
     embed_on: bool,
-) -> anyhow::Result<(PathBuf, Cache)> {
+) -> anyhow::Result<(PathBuf, Cache, String)> {
+    let repo = walk::repo_name(root);
     let root = root.canonicalize()?;
     let mut cache: Cache = HashMap::new();
-    for sf in walk::collect_files(&root) {
+    for sf in walk::collect_files(&root, &repo) {
         if let Ok(src) = std::fs::read(&sf.path) {
             if let Ok(pr) = parse::parse_file(&sf.rel, &src, sf.lang) {
                 cache.insert(sf.rel.clone(), pr);
@@ -68,7 +69,7 @@ pub fn index_once_owned(
         store.set_embeddings(&items)?;
     }
     eprintln!("codegraph: indexed {} files", cache.len());
-    Ok((root, cache))
+    Ok((root, cache, repo))
 }
 
 /// Full index into an *already-shared* store, then watch — all on a background
@@ -82,10 +83,11 @@ pub fn index_and_watch(
     vindex: SharedVector,
     embed_on: bool,
 ) -> anyhow::Result<()> {
+    let repo = walk::repo_name(root);
     let root = root.canonicalize()?;
 
     let mut cache: Cache = HashMap::new();
-    for sf in walk::collect_files(&root) {
+    for sf in walk::collect_files(&root, &repo) {
         if let Ok(src) = std::fs::read(&sf.path) {
             if let Ok(pr) = parse::parse_file(&sf.rel, &src, sf.lang) {
                 cache.insert(sf.rel.clone(), pr);
@@ -128,7 +130,7 @@ pub fn index_and_watch(
     }
 
     eprintln!("codegraph: initial index complete ({} files)", cache.len());
-    watch_only(root, cache, store, embedder, embed_on, Some(vindex))
+    watch_only(root, cache, store, embedder, embed_on, Some(vindex), repo)
 }
 
 /// Watch `root` and patch the shared store on each change. Runs on a plain OS
@@ -141,6 +143,7 @@ pub fn watch_only(
     embedder: SharedEmbedder,
     embed_on: bool,
     vindex: Option<SharedVector>,
+    repo: String,
 ) -> anyhow::Result<()> {
     eprintln!("codegraph: watching {}", root.display());
     let (tx, rx) = channel();
@@ -163,7 +166,7 @@ pub fn watch_only(
                     let Ok(stripped) = path.strip_prefix(&root) else {
                         continue;
                     };
-                    let rel = stripped.to_string_lossy().replace('\\', "/");
+                    let rel = format!("{repo}/{}", stripped.to_string_lossy().replace('\\', "/"));
                     if !path.exists() {
                         remove(&store, &mut cache, &rel);
                         continue;
@@ -190,7 +193,7 @@ pub fn watch_only(
                     let Ok(stripped) = path.strip_prefix(&root) else {
                         continue;
                     };
-                    let rel = stripped.to_string_lossy().replace('\\', "/");
+                    let rel = format!("{repo}/{}", stripped.to_string_lossy().replace('\\', "/"));
                     remove(&store, &mut cache, &rel);
                 }
             }

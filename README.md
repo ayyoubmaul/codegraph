@@ -94,6 +94,11 @@ Vertical slices, each one builds and runs:
       metadata back from the graph DB, and the live watcher adds new vectors.
       Falls back to brute-force when no index. Verified: HNSW results match
       brute-force on sieve. (CLI one-shot `search` stays brute-force.)
+- [x] **Slice 11 — workspace / multi-repo.** `index <repoA> <repoB> … --db ws.db`
+      indexes several repos into one graph, path-qualified by repo
+      (`repoA/src/…`) and resolved together so **cross-repo call edges** form;
+      queries span the workspace and show `repo/file:line`. Verified: a call in
+      repo B to a function defined in repo A links across.
 
 ## Build & use
 
@@ -102,6 +107,7 @@ cargo build --release
 B=./target/release/codegraph
 
 $B index <repo> --db graph.db --embed         # parse → graph → embeddings
+$B index <repoA> <repoB> --db ws.db --embed   # multi-repo workspace (cross-repo edges)
 $B analyze --db graph.db                       # PageRank + Louvain communities
 $B search "rate limiting logic" --db graph.db  # find by meaning
 $B who-calls parseAuth --db graph.db

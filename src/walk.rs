@@ -36,9 +36,18 @@ pub struct SourceFile {
     pub lang: Lang,
 }
 
-/// Walk `root`, honoring `.gitignore`, returning every file with a supported
-/// language.
-pub fn collect_files(root: &Path) -> Vec<SourceFile> {
+/// The workspace prefix for a repo path: its (canonicalized) directory name.
+pub fn repo_name(path: &Path) -> String {
+    path.canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "repo".to_string())
+}
+
+/// Walk `root`, honoring `.gitignore`, returning every supported-language file.
+/// Paths are qualified with `repo/` so ids stay unique across repos in a
+/// multi-repo workspace.
+pub fn collect_files(root: &Path, repo: &str) -> Vec<SourceFile> {
     let mut files = Vec::new();
     let walker = WalkBuilder::new(root)
         // Prune denylisted directories (don't even descend into them).
@@ -74,11 +83,12 @@ pub fn collect_files(root: &Path) -> Vec<SourceFile> {
         if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
             continue;
         }
-        let rel = path
+        let stripped = path
             .strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        let rel = format!("{repo}/{stripped}");
         files.push(SourceFile {
             path: path.to_path_buf(),
             rel,

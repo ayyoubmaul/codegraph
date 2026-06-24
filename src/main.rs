@@ -19,7 +19,7 @@ mod walk;
 mod watch;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
@@ -39,11 +39,11 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Index {
-            path,
+            paths,
             json,
             db,
             embed,
-        } => index(&path, json, db.as_deref(), embed),
+        } => index(&paths, json, db.as_deref(), embed),
         Command::Search { query, db, k } => search(&query, &db, k),
         Command::WhoCalls { name, db } => who_calls(&name, &db),
         Command::CallChain { name, db, depth } => call_chain(&name, &db, depth),
@@ -74,10 +74,14 @@ fn ui_cmd(db: &Path, port: u16, watch: Option<&Path>, embed: bool) -> anyhow::Re
     rt.block_on(ui::serve(db, port, watch, embed))
 }
 
-fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Result<()> {
+fn index(paths: &[PathBuf], json: bool, db: Option<&Path>, embed: bool) -> anyhow::Result<()> {
     let start = Instant::now();
 
-    let files = walk::collect_files(root);
+    let mut files = Vec::new();
+    for path in paths {
+        let repo = walk::repo_name(path);
+        files.extend(walk::collect_files(path, &repo));
+    }
     let file_count = files.len();
     let rel_paths: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
 

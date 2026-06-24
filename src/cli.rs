@@ -17,11 +17,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Index a codebase: walk, parse, and extract symbols.
+    /// Index one or more codebases into a workspace: walk, parse, extract.
     Index {
-        /// Path to the repository root.
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        /// One or more repository roots (multi-repo workspace, cross-repo edges).
+        #[arg(default_value = ".", num_args = 1..)]
+        paths: Vec<PathBuf>,
 
         /// Emit the graph batch as JSON instead of a summary.
         #[arg(long)]
