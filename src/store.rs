@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use lbug::{Connection, Database, SystemConfig, Value};
+use lbug::{Connection, Database, LogicalType, SystemConfig, Value};
 
 use crate::graph::{EdgeKind, GraphBatch, NodeKind, Store};
 
@@ -86,6 +86,53 @@ impl LadybugStore {
         Ok(result.filter_map(row_to_hit).collect())
     }
 
+    /// Store an embedding vector for each `(def_id, vector)` pair.
+    pub fn set_embeddings(&mut self, items: &[(String, Vec<f32>)]) -> anyhow::Result<()> {
+        let conn = self.connect()?;
+        conn.query("BEGIN TRANSACTION")
+            .map_err(|e| anyhow::anyhow!("lbug begin: {e}"))?;
+        let mut stmt = conn
+            .prepare("MATCH (d:Def {id: $id}) SET d.embedding = $vec")
+            .map_err(|e| anyhow::anyhow!("lbug prepare set_embedding: {e}"))?;
+        for (id, vec) in items {
+            let arr = Value::Array(
+                LogicalType::Float,
+                vec.iter().map(|f| Value::Float(*f)).collect(),
+            );
+            conn.execute(
+                &mut stmt,
+                vec![("id", Value::String(id.clone())), ("vec", arr)],
+            )
+            .map_err(|e| anyhow::anyhow!("lbug set_embedding `{id}`: {e}"))?;
+        }
+        conn.query("COMMIT")
+            .map_err(|e| anyhow::anyhow!("lbug commit: {e}"))?;
+        Ok(())
+    }
+
+    /// Brute-force cosine KNN over stored embeddings: the `k` definitions most
+    /// similar to `query`, each with its similarity score.
+    pub fn semantic_search(&self, query: &[f32], k: usize) -> anyhow::Result<Vec<(DefHit, f32)>> {
+        let k = k.clamp(1, 100);
+        let conn = self.connect()?;
+        let q = Value::Array(
+            LogicalType::Float,
+            query.iter().map(|f| Value::Float(*f)).collect(),
+        );
+        let mut stmt = conn
+            .prepare(&format!(
+                "MATCH (d:Def) WHERE d.embedding IS NOT NULL \
+                 RETURN d.name, d.file, d.start_line, \
+                 array_cosine_similarity(d.embedding, $q) AS sim \
+                 ORDER BY sim DESC LIMIT {k}"
+            ))
+            .map_err(|e| anyhow::anyhow!("lbug prepare semantic_search: {e}"))?;
+        let result = conn
+            .execute(&mut stmt, vec![("q", q)])
+            .map_err(|e| anyhow::anyhow!("lbug semantic_search: {e}"))?;
+        Ok(result.filter_map(row_to_hit_score).collect())
+    }
+
     fn count(&self, query: &str) -> anyhow::Result<u64> {
         let conn = self.connect()?;
         let mut result = conn
@@ -104,7 +151,8 @@ impl Store for LadybugStore {
         for ddl in [
             "CREATE NODE TABLE IF NOT EXISTS File(path STRING, PRIMARY KEY(path))",
             "CREATE NODE TABLE IF NOT EXISTS Def(id STRING, name STRING, kind STRING, \
-             file STRING, start_line INT64, end_line INT64, PRIMARY KEY(id))",
+             file STRING, start_line INT64, end_line INT64, embedding FLOAT[384], \
+             PRIMARY KEY(id))",
             "CREATE REL TABLE IF NOT EXISTS Defines(FROM File TO Def)",
             "CREATE REL TABLE IF NOT EXISTS Calls(FROM Def TO Def)",
             "CREATE REL TABLE IF NOT EXISTS Imports(FROM File TO File)",
@@ -238,4 +286,33 @@ fn row_to_hit(row: Vec<Value>) -> Option<DefHit> {
         file,
         start_line,
     })
+}
+
+fn row_to_hit_score(row: Vec<Value>) -> Option<(DefHit, f32)> {
+    let mut it = row.into_iter();
+    let name = match it.next()? {
+        Value::String(s) => s,
+        _ => return None,
+    };
+    let file = match it.next()? {
+        Value::String(s) => s,
+        _ => return None,
+    };
+    let start_line = match it.next()? {
+        Value::Int64(n) => n,
+        _ => 0,
+    };
+    let sim = match it.next()? {
+        Value::Float(f) => f,
+        Value::Double(f) => f as f32,
+        _ => 0.0,
+    };
+    Some((
+        DefHit {
+            name,
+            file,
+            start_line,
+        },
+        sim,
+    ))
 }

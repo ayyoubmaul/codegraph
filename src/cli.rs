@@ -30,6 +30,24 @@ pub enum Command {
         /// Persist the graph to a LadybugDB database at this path.
         #[arg(long)]
         db: Option<PathBuf>,
+
+        /// Also compute + store local embeddings (requires `--db`; downloads the
+        /// model once, then runs offline).
+        #[arg(long)]
+        embed: bool,
+    },
+
+    /// Semantic search: find definitions by meaning (needs a `--db` indexed
+    /// with `--embed`).
+    Search {
+        /// Natural-language query.
+        query: String,
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// Number of results.
+        #[arg(long, default_value_t = 8)]
+        k: usize,
     },
 
     /// Show the direct callers of a symbol (uses a `--db` built by `index`).

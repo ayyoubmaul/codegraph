@@ -54,9 +54,11 @@ Vertical slices, each one builds and runs:
       JS/TS resolution) + receiver-aware, import-scoped call resolution
       (same-file → imported → repo-wide). *(Go/Rust module-path imports and true
       type inference still future.)*
-- [ ] **Slice 3 — semantic (flagship of the bet).** Embed symbols with
-      `fastembed` (local, offline) → LadybugDB `vector` extension (HNSW); hybrid
-      query: vector recall by *meaning* → structural graph expansion.
+- [x] **Slice 3 — semantic (flagship).** `fastembed` (local, offline) embeddings
+      stored as `FLOAT[384]` on `Def`; `search <text>` runs brute-force cosine
+      KNN via the built-in `array_cosine_similarity` — **no extension, fully
+      offline, one engine**. Verified on sieve (finds code by meaning).
+      *(HNSW extension = scale-only; auto vector→graph "hybrid" combine = next.)*
 - [ ] **Slice 4 — incremental.** `notify` watcher re-parses only changed files
       and patches the graph in-place (never stale).
 - [ ] **Slice 5 — graph intelligence.** Community detection (**Louvain**) +

@@ -5,6 +5,7 @@
 //! incremental watch (notify), and the MCP server (rmcp) land in later slices.
 
 mod cli;
+mod embed;
 mod graph;
 mod lang;
 mod parse;
@@ -31,13 +32,19 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Index { path, json, db } => index(&path, json, db.as_deref()),
+        Command::Index {
+            path,
+            json,
+            db,
+            embed,
+        } => index(&path, json, db.as_deref(), embed),
+        Command::Search { query, db, k } => search(&query, &db, k),
         Command::WhoCalls { name, db } => who_calls(&name, &db),
         Command::CallChain { name, db, depth } => call_chain(&name, &db, depth),
     }
 }
 
-fn index(root: &Path, json: bool, db: Option<&Path>) -> anyhow::Result<()> {
+fn index(root: &Path, json: bool, db: Option<&Path>, embed: bool) -> anyhow::Result<()> {
     let start = Instant::now();
 
     let files = walk::collect_files(root);
@@ -70,9 +77,36 @@ fn index(root: &Path, json: bool, db: Option<&Path>) -> anyhow::Result<()> {
         let persist_start = Instant::now();
         let mut store = store::LadybugStore::open(db_path)?;
         store.write_batch(&batch)?;
-        let (files, defs, defines, calls, imports) = store.summary()?;
+
+        if embed {
+            let defs: Vec<(String, String)> = batch
+                .nodes
+                .iter()
+                .filter(|n| n.kind == graph::NodeKind::Definition)
+                .map(|n| {
+                    let text = match n.symbol_kind {
+                        Some(k) => format!("{k:?} {}", n.name),
+                        None => n.name.clone(),
+                    };
+                    (n.id.clone(), text)
+                })
+                .collect();
+            let embed_start = Instant::now();
+            let mut embedder = embed::Embedder::new()?;
+            let vectors = embedder.embed_batch(defs.iter().map(|(_, t)| t.clone()).collect())?;
+            let items: Vec<(String, Vec<f32>)> = defs
+                .into_iter()
+                .zip(vectors)
+                .map(|((id, _), v)| (id, v))
+                .collect();
+            let n = items.len();
+            store.set_embeddings(&items)?;
+            println!("embedded {n} definitions in {:.2?}", embed_start.elapsed());
+        }
+
+        let (files, defs_c, defines, calls, imports) = store.summary()?;
         println!(
-            "persisted to {} → {files} files, {defs} defs, {defines} defines, {calls} calls, {imports} imports in {:.2?}",
+            "persisted to {} → {files} files, {defs_c} defs, {defines} defines, {calls} calls, {imports} imports in {:.2?}",
             db_path.display(),
             persist_start.elapsed()
         );
@@ -127,6 +161,22 @@ fn call_chain(name: &str, db: &Path, depth: u8) -> anyhow::Result<()> {
         );
         for h in hits {
             println!("  {:<28} {}:{}", h.name, h.file, h.start_line);
+        }
+    }
+    Ok(())
+}
+
+fn search(query: &str, db: &Path, k: usize) -> anyhow::Result<()> {
+    let store = store::LadybugStore::open(db)?;
+    let mut embedder = embed::Embedder::new()?;
+    let q = embedder.embed_one(query)?;
+    let hits = store.semantic_search(&q, k)?;
+    if hits.is_empty() {
+        println!("no results for `{query}` (did you index with --embed?)");
+    } else {
+        println!("top {} for `{query}`:", hits.len());
+        for (h, sim) in hits {
+            println!("  {sim:.3}  {:<28} {}:{}", h.name, h.file, h.start_line);
         }
     }
     Ok(())

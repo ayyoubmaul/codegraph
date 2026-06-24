@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.102"
 blake3 = "1.8.5"
 clap = { version = "4.6.1", features = ["derive"] }
+fastembed = "5.17.2"
 ignore = "0.4.26"
 lbug = "0.17.1"
 rayon = "1.12.0"
