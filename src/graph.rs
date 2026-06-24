@@ -112,7 +112,16 @@ impl GraphBatch {
             });
         }
 
-        for s in symbols {
+        // Dedup definitions by id (same file+name+line — happens in minified or
+        // generated code) so the bulk-COPY primary key stays unique and call
+        // resolution only targets nodes that actually exist.
+        let mut seen_ids: HashSet<String> = HashSet::new();
+        let symbols: Vec<&Symbol> = symbols
+            .iter()
+            .filter(|s| seen_ids.insert(Self::def_id(&s.file, &s.name, s.start_line)))
+            .collect();
+
+        for s in &symbols {
             let id = Self::def_id(&s.file, &s.name, s.start_line);
             batch.edges.push(Edge {
                 from: s.file.clone(),
@@ -156,8 +165,8 @@ impl GraphBatch {
 
         // Calls: name index, then receiver-aware + locality-scoped resolution.
         let mut by_name: HashMap<&str, Vec<&Symbol>> = HashMap::new();
-        for s in symbols {
-            by_name.entry(s.name.as_str()).or_default().push(s);
+        for s in &symbols {
+            by_name.entry(s.name.as_str()).or_default().push(*s);
         }
 
         let mut seen: HashSet<(String, String)> = HashSet::new();

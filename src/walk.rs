@@ -66,7 +66,11 @@ pub fn collect_files(root: &Path) -> Vec<SourceFile> {
         let Some(lang) = Lang::from_path(path) else {
             continue;
         };
-        // Skip oversized files (minified/generated/blobs).
+        // Skip minified/bundled files (everything on a few lines → garbage symbols).
+        if is_minified(path) {
+            continue;
+        }
+        // Skip oversized files (generated code, blobs).
         if entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
             continue;
         }
@@ -82,4 +86,12 @@ pub fn collect_files(root: &Path) -> Vec<SourceFile> {
         });
     }
     files
+}
+
+/// Minified/bundled files (`*.min.js`, `*.bundle.js`, …) put everything on a few
+/// lines, producing garbage symbols — skip them.
+fn is_minified(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.contains(".min.") || name.ends_with(".bundle.js"))
 }
