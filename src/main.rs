@@ -5,6 +5,7 @@
 //! incremental watch (notify), and the MCP server (rmcp) land in later slices.
 
 mod cli;
+mod graph;
 mod lang;
 mod parse;
 mod symbol;
@@ -37,6 +38,7 @@ fn index(root: &Path, json: bool) -> anyhow::Result<()> {
 
     let files = walk::collect_files(root);
     let file_count = files.len();
+    let rel_paths: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
 
     // Parse files in parallel; failures on a single file are skipped, not fatal.
     let symbols: Vec<Symbol> = files
@@ -47,10 +49,12 @@ fn index(root: &Path, json: bool) -> anyhow::Result<()> {
         })
         .collect();
 
+    // Assemble the graph batch that a Store will persist in Slice 2b.
+    let batch = graph::GraphBatch::build(&rel_paths, &symbols);
     let elapsed = start.elapsed();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&symbols)?);
+        println!("{}", serde_json::to_string_pretty(&batch)?);
         return Ok(());
     }
 
@@ -60,7 +64,9 @@ fn index(root: &Path, json: bool) -> anyhow::Result<()> {
     }
 
     println!(
-        "indexed {file_count} files, {} symbols in {elapsed:.2?}",
+        "indexed {file_count} files → {} nodes, {} edges ({} symbols) in {elapsed:.2?}",
+        batch.nodes.len(),
+        batch.edges.len(),
         symbols.len()
     );
     for (kind, count) in by_kind {

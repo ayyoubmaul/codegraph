@@ -42,8 +42,8 @@ Vertical slices, each one builds and runs:
 - [x] **Slice 1 — parse pipeline.** gitignore-aware walk → tree-sitter →
       symbol extraction, parallelized with rayon. Languages: Rust, Python,
       Go, TypeScript/JS. `codegraph index <path>`.
-- [ ] **Slice 2a — graph model + store seam.** `GraphBatch` (nodes/edges) +
-      `Store` trait. *(cmake-free; in progress)*
+- [x] **Slice 2a — graph model + store seam.** `GraphBatch` (nodes/edges) +
+      `Store` trait. `index` now reports node/edge counts. *(cmake-free)*
 - [ ] **Slice 2b — LadybugDB store.** Persist the batch via `lbug`; extract
       `CALLS`/`IMPORTS` edges; Cypher-backed `who_calls` / `call_chain`.
       *(needs `brew install cmake`)*
