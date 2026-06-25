@@ -38,19 +38,19 @@ It ships as **one cross-platform binary**, runs **fully offline**, and stays
 
 ## Why codegraph
 
-Inspired by [`a structural-only index`](https://github.com/upstream/a structural-only index),
-but it deliberately beats three of its tradeoffs:
+The usual ways an agent explores a codebase — grepping, reading files
+top-to-bottom, or a purely structural index — are slow, token-hungry, or go
+stale. codegraph is built around four design choices that avoid those traps:
 
-> **Everything a structural-only index does structurally — _plus_ retrieval by
-> meaning, that _never goes stale_, on-disk in _low RAM_, fully offline, one
-> cross-platform binary.**
+> **A structural graph _and_ retrieval by meaning, that _never goes stale_,
+> on-disk in _low RAM_, fully offline, in one cross-platform binary.**
 
-| a structural-only index | codegraph |
+| Design choice | Why it matters |
 | --- | --- |
-| Structural only (no semantic search) | **Hybrid**: structural graph **+** local semantic embeddings |
-| Batch reindex → goes stale | **Incremental**: file-watch, re-parse only what changed |
-| In-memory SQLite (RAM-bound) | **On-disk** embedded graph (low, predictable RAM) |
-| C (fast, but unsafe + hard to extend) | **Rust** (same speed class, memory-safe, easy to extend) |
+| **Hybrid** — structural graph **+** local semantic embeddings | find code by name *and* by meaning |
+| **Incremental** — file-watch, re-parse only what changed | the index never goes stale |
+| **On-disk** embedded graph | low, predictable RAM, even on big monorepos |
+| **Rust** + native crates | C-class speed, memory-safe, one static binary |
 
 ## Features
 
