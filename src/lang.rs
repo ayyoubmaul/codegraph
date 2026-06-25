@@ -194,4 +194,70 @@ impl Lang {
         };
         Some(raw.trim_matches(['"', '\'', '`']).to_string())
     }
+
+    /// `(param_name, base_type_name)` for a function/method's typed parameters
+    /// (Rust/Go/TS/Python). Untyped params are skipped.
+    pub fn param_types(self, fn_node: Node, source: &[u8]) -> Vec<(String, String)> {
+        let Some(params) = fn_node.child_by_field_name("parameters") else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut cursor = params.walk();
+        for p in params.children(&mut cursor) {
+            let (name, ty) = match p.kind() {
+                "parameter" => (p.child_by_field_name("pattern"), p.child_by_field_name("type")),
+                "parameter_declaration" => {
+                    (p.child_by_field_name("name"), p.child_by_field_name("type"))
+                }
+                "required_parameter" | "optional_parameter" => {
+                    (p.child_by_field_name("pattern"), p.child_by_field_name("type"))
+                }
+                "typed_parameter" | "typed_default_parameter" => {
+                    (p.named_child(0), p.child_by_field_name("type"))
+                }
+                _ => continue,
+            };
+            if let (Some(name), Some(ty)) = (name, ty) {
+                if let (Ok(n), Some(t)) = (name.utf8_text(source), first_type_name(ty, source)) {
+                    out.push((n.to_string(), t));
+                }
+            }
+        }
+        out
+    }
+
+    /// Go method receiver `(name, type)` — `func (c *Cache) m()` → `(c, Cache)`.
+    pub fn go_receiver(self, method_node: Node, source: &[u8]) -> Option<(String, String)> {
+        let recv = method_node.child_by_field_name("receiver")?;
+        let mut cursor = recv.walk();
+        for p in recv.children(&mut cursor) {
+            if p.kind() == "parameter_declaration" {
+                let name = p.child_by_field_name("name")?.utf8_text(source).ok()?;
+                let ty = first_type_name(p.child_by_field_name("type")?, source)?;
+                return Some((name.to_string(), ty));
+            }
+        }
+        None
+    }
+}
+
+/// First `type_identifier` (or `identifier`) under `node` — the base type name,
+/// unwrapping references/pointers/generics.
+fn first_type_name(node: Node, source: &[u8]) -> Option<String> {
+    find_kind(node, "type_identifier", source)
+        .or_else(|| find_kind(node, "identifier", source))
+        .map(|t| t.split('<').next().unwrap_or(&t).trim().to_string())
+}
+
+fn find_kind(node: Node, kind: &str, source: &[u8]) -> Option<String> {
+    if node.kind() == kind {
+        return node.utf8_text(source).ok().map(String::from);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(t) = find_kind(child, kind, source) {
+            return Some(t);
+        }
+    }
+    None
 }

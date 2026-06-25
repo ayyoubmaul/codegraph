@@ -1,16 +1,19 @@
 //! Parse a single source file into definitions ([`Symbol`]), unresolved call
 //! sites ([`CallRef`]), and import statements ([`ImportRef`]).
 //!
-//! A depth-first walk tracks the nearest enclosing definition *and* the
-//! enclosing type. Definitions inside a type (impl/class) are tagged with that
-//! type as their `owner`; method calls on `self`/`this` carry that type as the
-//! receiver type, so resolution can be type-aware.
+//! A depth-first walk tracks: the enclosing definition; the enclosing type
+//! (impl/class) so definitions get an `owner`; and a per-function variable→type
+//! map built from typed parameters and the Go method receiver. Method calls on
+//! `self`/`this` or on a typed variable carry the receiver type, enabling
+//! type-aware resolution.
+
+use std::collections::HashMap;
 
 use tree_sitter::{Node, Parser};
 
 use crate::graph::{CallRef, GraphBatch, ImportRef};
 use crate::lang::Lang;
-use crate::symbol::Symbol;
+use crate::symbol::{Symbol, SymbolKind};
 
 /// Everything extracted from one file.
 #[derive(Debug, Default)]
@@ -31,10 +34,21 @@ pub fn parse_file(rel_path: &str, source: &[u8], lang: Lang) -> anyhow::Result<P
         .ok_or_else(|| anyhow::anyhow!("tree-sitter returned no tree"))?;
 
     let mut result = ParseResult::default();
-    collect(tree.root_node(), source, lang, rel_path, None, None, &mut result);
+    let no_vars = HashMap::new();
+    collect(
+        tree.root_node(),
+        source,
+        lang,
+        rel_path,
+        None,
+        None,
+        &no_vars,
+        &mut result,
+    );
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect(
     node: Node,
     source: &[u8],
@@ -42,35 +56,59 @@ fn collect(
     rel_path: &str,
     enclosing: Option<&str>,
     enclosing_type: Option<&str>,
+    var_types: &HashMap<String, String>,
     out: &mut ParseResult,
 ) {
-    // The definition this node opens, becoming its descendants' scope.
     let mut opened_def: Option<String> = None;
-    // The type this node opens (impl/class), becoming descendants' owner type.
     let opened_type: Option<String> = lang.type_container_name(node, source);
+
+    // Entering a function/method: build its variable→type scope (params + Go
+    // receiver). Descendant calls resolve receivers against this map.
+    let is_fn = matches!(
+        lang.symbol_kind(node.kind()),
+        Some(SymbolKind::Function | SymbolKind::Method)
+    );
+    let local_vars: Option<HashMap<String, String>> = if is_fn {
+        let mut m = HashMap::new();
+        for (n, t) in lang.param_types(node, source) {
+            m.insert(n, t);
+        }
+        if let Some((rn, rt)) = lang.go_receiver(node, source) {
+            m.insert(rn, rt);
+        }
+        Some(m)
+    } else {
+        None
+    };
+    let child_vars: &HashMap<String, String> = local_vars.as_ref().unwrap_or(var_types);
 
     if let Some(kind) = lang.symbol_kind(node.kind()) {
         if let Some(name_node) = node.child_by_field_name("name") {
             if let Ok(name) = name_node.utf8_text(source) {
                 let start_line = node.start_position().row + 1;
                 opened_def = Some(GraphBatch::def_id(rel_path, name, start_line));
+                // Owner: Go method → receiver type; else the enclosing type.
+                let owner = lang
+                    .go_receiver(node, source)
+                    .map(|(_, t)| t)
+                    .or_else(|| enclosing_type.map(String::from));
                 out.symbols.push(Symbol {
                     kind,
                     name: name.to_string(),
                     file: rel_path.to_string(),
                     start_line,
                     end_line: node.end_position().row + 1,
-                    owner: enclosing_type.map(String::from),
+                    owner,
                 });
             }
         }
     } else if lang.is_call_node(node.kind()) {
         if let Some(caller) = enclosing {
             if let Some((callee, is_method, receiver)) = lang.callee_name_of(node, source) {
-                // Type-aware: `self`/`this` calls target the enclosing type.
                 let receiver_type = match receiver.as_deref() {
                     Some("self") | Some("this") => enclosing_type.map(String::from),
-                    _ => None,
+                    Some(r) => var_types.get(r).cloned(),
+                    None => None,
                 };
                 out.calls.push(CallRef {
                     caller_id: caller.to_string(),
@@ -94,6 +132,15 @@ fn collect(
     let child_type = opened_type.as_deref().or(enclosing_type);
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect(child, source, lang, rel_path, child_scope, child_type, out);
+        collect(
+            child,
+            source,
+            lang,
+            rel_path,
+            child_scope,
+            child_type,
+            child_vars,
+            out,
+        );
     }
 }

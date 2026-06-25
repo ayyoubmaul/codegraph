@@ -99,6 +99,14 @@ Vertical slices, each one builds and runs:
       (`repoA/src/…`) and resolved together so **cross-repo call edges** form;
       queries span the workspace and show `repo/file:line`. Verified: a call in
       repo B to a function defined in repo A links across.
+- [x] **Slice 12 — scope-aware resolution.** Ambiguous names resolve locally
+      (same-file → imported → globally-unique → same-repo, capped); only unique
+      names cross repos. Killed the cross-repo false-edge noise a token test
+      exposed at workspace scale.
+- [x] **Slice 13 — type-aware resolution (v1).** Methods carry their owner type;
+      `self`/`this` calls resolve to a method on the enclosing type. Verified:
+      two types both defining `shared` → `self.shared()` hits the right one.
+      *(Typed params, Go receivers, and `let`/`:=` inference: follow-ups.)*
 
 ## Build & use
 

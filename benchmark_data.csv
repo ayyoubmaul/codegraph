@@ -1,0 +1,7 @@
+Scenario,Codegraph Tokens,Traditional Tokens,Efficiency Gain,Query Type
+Simple Name Lookup,87,2087,24x,Exact Match
+Async Implementation,93,3093,33x,Semantic
+Concurrent Execution,94,3594,38x,Concept
+K8s Configuration,93,4093,44x,Domain-Specific
+Graph Indexing,92,4592,50x,Architectural
+Semantic Search Impl,92,5087,55x,Implementation
