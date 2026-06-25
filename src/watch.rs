@@ -116,6 +116,53 @@ pub fn index_and_watch(
     watch_only(roots, cache, store, embedder, embed_on, Some(vindex))
 }
 
+/// Index a single repo/directory into an already-open shared store **on demand**
+/// (e.g. an MCP `index_repo` call), without starting a watch loop. This is the
+/// only way to add a repo while a server holds the database — a separate
+/// `codegraph index` process can't, because LadybugDB is single-writer.
+///
+/// Resolves calls within the repo, writes its sub-graph, and (when `embed_on`)
+/// embeds its defs and adds them to the live vector index. Returns
+/// `(files, defs)`. Cross-repo edges to already-indexed repos aren't formed
+/// here (a one-shot index only sees this repo's symbols); the repo is still
+/// fully queryable, and `important`/PageRank picks it up on the next analyze.
+pub fn index_path(
+    path: &Path,
+    store: &LadybugStore,
+    embed_on: bool,
+    vindex: Option<&SharedVector>,
+) -> anyhow::Result<(usize, usize)> {
+    let (_roots, cache) = prepare(&[path.to_path_buf()])?;
+    let batch = build_full(&cache);
+    let n_files = cache.len();
+    let n_defs = batch
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Definition)
+        .count();
+    store.write_batch(&batch)?;
+    if embed_on && n_defs > 0 {
+        let already = store.embedded_ids()?;
+        let mut embedder = Embedder::new()?;
+        let items = embed::embed_defs(&mut embedder, &batch, &already)?;
+        if !items.is_empty() {
+            store.set_embeddings(&items)?;
+            if let Some(vi) = vindex {
+                let mut guard = vi.blocking_write();
+                match guard.as_mut() {
+                    Some(idx) => {
+                        for (id, vec) in &items {
+                            idx.add(id, vec);
+                        }
+                    }
+                    None => *guard = crate::vector::build_from_store(store)?,
+                }
+            }
+        }
+    }
+    Ok((n_files, n_defs))
+}
+
 /// Watch every root and patch the shared store on each change. Runs on a plain
 /// OS thread (uses `blocking_lock`), not inside the async runtime.
 pub fn watch_only(

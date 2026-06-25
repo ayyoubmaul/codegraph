@@ -79,6 +79,15 @@ struct TopKArgs {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+struct IndexRepoArgs {
+    /// Absolute path to a repo/directory to index into the live graph.
+    path: String,
+    /// Also compute embeddings for semantic search (default true).
+    #[serde(default)]
+    embed: Option<bool>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct OutlineArgs {
     /// Optional: outline just one repo in the workspace (by name).
     #[serde(default)]
@@ -221,6 +230,37 @@ impl CodegraphServer {
             out.push_str("no repos indexed yet (index a workspace with `index`)");
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "Index a repo into the live graph on demand — for a repo that ISN'T in the workspace yet (e.g. a freshly cloned dependency). Give an absolute path; afterwards query it like any other repo via repo=<name>. This is the only way to add a repo while the server is running (a separate `codegraph index` process can't — single-writer lock)."
+    )]
+    async fn index_repo(
+        &self,
+        Parameters(args): Parameters<IndexRepoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = std::path::PathBuf::from(&args.path);
+        if !path.is_dir() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "not a directory: {} — give an absolute path to a repo.",
+                args.path
+            ))]));
+        }
+        let repo = crate::walk::repo_name(&path);
+        let store = self.store.clone();
+        let vindex = self.vindex.clone();
+        let embed = args.embed.unwrap_or(true);
+        // Indexing is CPU + blocking I/O — run off the async runtime.
+        let res = tokio::task::spawn_blocking(move || {
+            crate::watch::index_path(&path, &store, embed, Some(&vindex))
+        })
+        .await
+        .map_err(|e| internal(anyhow::anyhow!("index task: {e}")))?;
+        let (files, defs) = res.map_err(internal)?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "indexed {repo}: {files} files, {defs} defs — now queryable with \
+             repo=\"{repo}\" (important/PageRank fills in on the next analyze)."
+        ))]))
     }
 
     #[tool(
