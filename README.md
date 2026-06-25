@@ -103,10 +103,12 @@ Vertical slices, each one builds and runs:
       (same-file → imported → globally-unique → same-repo, capped); only unique
       names cross repos. Killed the cross-repo false-edge noise a token test
       exposed at workspace scale.
-- [x] **Slice 13 — type-aware resolution (v1).** Methods carry their owner type;
-      `self`/`this` calls resolve to a method on the enclosing type. Verified:
-      two types both defining `shared` → `self.shared()` hits the right one.
-      *(Typed params, Go receivers, and `let`/`:=` inference: follow-ups.)*
+- [x] **Slice 13 — type-aware resolution.** Methods carry their owner type
+      (Rust `impl` / Go receiver / TS+JS+Python `class`). Calls resolve via:
+      `self`/`this` → enclosing type, and **typed params / Go receivers → the
+      variable's type**. Verified on Rust + Go fixtures (two types sharing a
+      method name → the call hits the right one). *(Local `let`/`:=` constructor
+      inference: the remaining follow-up.)*
 
 ## Build & use
 

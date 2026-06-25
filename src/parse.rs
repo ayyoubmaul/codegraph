@@ -76,6 +76,9 @@ fn collect(
         if let Some((rn, rt)) = lang.go_receiver(node, source) {
             m.insert(rn, rt);
         }
+        for (n, t) in lang.local_var_types(node, source) {
+            m.insert(n, t);
+        }
         Some(m)
     } else {
         None
@@ -107,7 +110,14 @@ fn collect(
             if let Some((callee, is_method, receiver)) = lang.callee_name_of(node, source) {
                 let receiver_type = match receiver.as_deref() {
                     Some("self") | Some("this") => enclosing_type.map(String::from),
-                    Some(r) => var_types.get(r).cloned(),
+                    Some(r) => var_types.get(r).cloned().or_else(|| {
+                        // Capitalized receiver (`Type::new`, `Type.make()`) is a
+                        // type/class reference → resolve as that type.
+                        r.chars()
+                            .next()
+                            .is_some_and(|c| c.is_uppercase())
+                            .then(|| r.to_string())
+                    }),
                     None => None,
                 };
                 out.calls.push(CallRef {

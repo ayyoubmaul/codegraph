@@ -239,6 +239,14 @@ impl Lang {
         }
         None
     }
+
+    /// `(var_name, base_type)` for locals declared in this function body, where
+    /// the type is inferable from an annotation or a constructor/literal.
+    pub fn local_var_types(self, fn_node: Node, source: &[u8]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        collect_decls(fn_node, source, &mut out);
+        out
+    }
 }
 
 /// First `type_identifier` (or `identifier`) under `node` — the base type name,
@@ -260,4 +268,136 @@ fn find_kind(node: Node, kind: &str, source: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Walk a function body collecting `(var, type)` from typed/constructed locals.
+fn collect_decls(node: Node, source: &[u8], out: &mut Vec<(String, String)>) {
+    match node.kind() {
+        "let_declaration" => {
+            // Rust: let x: T = ..  /  let x = T::new(..)  /  let x = T { .. }
+            if let Some(name) = pattern_ident(node.child_by_field_name("pattern"), source) {
+                let ty = node
+                    .child_by_field_name("type")
+                    .and_then(|t| first_type_name(t, source))
+                    .or_else(|| node.child_by_field_name("value").and_then(|v| ctor_type(v, source)));
+                if let Some(t) = ty {
+                    out.push((name, t));
+                }
+            }
+        }
+        "variable_declarator" => {
+            // TS: const x: T = ..  /  const x = new T(..)
+            if let Some(name) = node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(source).ok())
+            {
+                let ty = node
+                    .child_by_field_name("type")
+                    .and_then(|t| first_type_name(t, source))
+                    .or_else(|| node.child_by_field_name("value").and_then(|v| ctor_type(v, source)));
+                if let Some(t) = ty {
+                    out.push((name.to_string(), t));
+                }
+            }
+        }
+        "var_spec" | "const_spec" => {
+            // Go: var x T
+            if let (Some(name), Some(t)) = (
+                node.child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source).ok()),
+                node.child_by_field_name("type")
+                    .and_then(|t| first_type_name(t, source)),
+            ) {
+                out.push((name.to_string(), t));
+            }
+        }
+        "short_var_declaration" => {
+            // Go: x := T{..}  /  x := NewT(..)
+            if let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            ) {
+                let mut lc = left.walk();
+                let mut rc = right.walk();
+                let names: Vec<_> = left.named_children(&mut lc).collect();
+                let vals: Vec<_> = right.named_children(&mut rc).collect();
+                for (nm, val) in names.iter().zip(vals.iter()) {
+                    if let (Ok(name), Some(t)) = (nm.utf8_text(source), ctor_type(*val, source)) {
+                        out.push((name.to_string(), t));
+                    }
+                }
+            }
+        }
+        "assignment" => {
+            // Python: x: T = ..  /  x = T(..)
+            if let Some(name) = node.child_by_field_name("left").and_then(|n| {
+                (n.kind() == "identifier")
+                    .then(|| n.utf8_text(source).ok())
+                    .flatten()
+            }) {
+                let ty = node
+                    .child_by_field_name("type")
+                    .and_then(|t| first_type_name(t, source))
+                    .or_else(|| node.child_by_field_name("right").and_then(|v| ctor_type(v, source)));
+                if let Some(t) = ty {
+                    out.push((name.to_string(), t));
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_decls(child, source, out);
+    }
+}
+
+/// Infer a base type from an initializer: `T::new(..)`, `T{..}`, `new T(..)`,
+/// `NewT(..)` (Go), `T(..)` (capitalized → constructor).
+fn ctor_type(value: Node, source: &[u8]) -> Option<String> {
+    match value.kind() {
+        "call_expression" | "call" => {
+            let func = value.child_by_field_name("function")?;
+            match func.kind() {
+                "scoped_identifier" => first_type_name(func.child_by_field_name("path")?, source),
+                "type_identifier" => first_type_name(func, source),
+                _ => ctor_name_to_type(func.utf8_text(source).ok()?),
+            }
+        }
+        "struct_expression" => first_type_name(value.child_by_field_name("name")?, source),
+        "composite_literal" => first_type_name(value.child_by_field_name("type")?, source),
+        "new_expression" => first_type_name(value.child_by_field_name("constructor")?, source),
+        "reference_expression" | "unary_expression" | "parenthesized_expression"
+        | "await_expression" => {
+            let mut cursor = value.walk();
+            value.children(&mut cursor).find_map(|c| ctor_type(c, source))
+        }
+        _ => None,
+    }
+}
+
+/// `NewCache`/`newCache` → `Cache`; a capitalized call name → itself (a class).
+fn ctor_name_to_type(name: &str) -> Option<String> {
+    let last = name.rsplit(['.', ':']).next().unwrap_or(name);
+    if let Some(rest) = last.strip_prefix("New").or_else(|| last.strip_prefix("new")) {
+        if rest.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return Some(rest.to_string());
+        }
+    }
+    last.chars()
+        .next()
+        .is_some_and(|c| c.is_uppercase())
+        .then(|| last.to_string())
+}
+
+fn pattern_ident(pattern: Option<Node>, source: &[u8]) -> Option<String> {
+    let p = pattern?;
+    match p.kind() {
+        "identifier" => p.utf8_text(source).ok().map(String::from),
+        "mut_pattern" => p
+            .named_child(0)
+            .and_then(|c| c.utf8_text(source).ok())
+            .map(String::from),
+        _ => None,
+    }
 }
