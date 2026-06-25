@@ -127,6 +127,10 @@ pub enum Command {
         /// Keep embeddings fresh while watching (requires --watch).
         #[arg(long)]
         embed: bool,
+        /// With --watch, also re-run analyze (PageRank/communities) every N
+        /// seconds — they're batch, not incremental.
+        #[arg(long)]
+        reanalyze: Option<u64>,
     },
 
     /// Launch the web UI to explore the graph in a browser.
@@ -144,5 +148,9 @@ pub enum Command {
         /// Keep embeddings fresh while watching (requires --watch).
         #[arg(long)]
         embed: bool,
+        /// With --watch, also re-run analyze (PageRank/communities) every N
+        /// seconds — they're batch, not incremental.
+        #[arg(long)]
+        reanalyze: Option<u64>,
     },
 }

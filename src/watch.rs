@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::channel;
+use std::time::Duration;
 
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::Mutex;
@@ -60,6 +61,7 @@ pub fn index_and_watch(
     embedder: SharedEmbedder,
     vindex: SharedVector,
     embed_on: bool,
+    reanalyze: Option<u64>,
 ) -> anyhow::Result<()> {
     let (roots, cache) = prepare(paths)?;
     let batch = build_full(&cache);
@@ -96,6 +98,23 @@ pub fn index_and_watch(
         cache.len(),
         roots.len()
     );
+
+    // Periodically re-run analyze (PageRank/communities are batch, not
+    // incremental) on a background thread sharing the store.
+    if let Some(secs) = reanalyze {
+        let s = store.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(secs.max(1)));
+                let mut guard = s.blocking_lock();
+                match crate::analyze::run(&mut guard, 30) {
+                    Ok((n, c)) => eprintln!("codegraph: re-analyzed {n} defs → {c} communities"),
+                    Err(e) => eprintln!("codegraph: re-analyze failed: {e}"),
+                }
+            }
+        });
+    }
+
     watch_only(roots, cache, store, embedder, embed_on, Some(vindex))
 }
 

@@ -110,6 +110,11 @@ Vertical slices, each one builds and runs:
       the inferred type; qualified `Type::new()` → the qualifier. Verified across
       Rust/Go/TS fixtures (two types sharing a method name → the right one wins).
       Complete for the static languages; Python stays name-based for dynamic cases.
+- [x] **Slice 14 — multi-root watch.** `--watch` is repeatable, so
+      `serve --watch repoA --watch repoB …` (or `ui`) keeps the **whole
+      workspace** live — create/modify/delete in *any* watched repo patches the
+      graph. Verified across two repos. *(`analyze` PageRank/communities stays a
+      batch step — re-run to refresh `important`/`communities`.)*
 
 ## Build & use
 

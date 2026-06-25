@@ -216,7 +216,12 @@ pub async fn serve(db: &Path) -> anyhow::Result<()> {
 
 /// Serve over stdio while a background thread watches `repo` and keeps the
 /// shared store fresh. The initial index completes before serving begins.
-pub async fn serve_watch(db: &Path, repos: &[PathBuf], embed: bool) -> anyhow::Result<()> {
+pub async fn serve_watch(
+    db: &Path,
+    repos: &[PathBuf],
+    embed: bool,
+    reanalyze: Option<u64>,
+) -> anyhow::Result<()> {
     let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(LadybugStore::open(db)?));
     let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
     let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(None));
@@ -231,7 +236,7 @@ pub async fn serve_watch(db: &Path, repos: &[PathBuf], embed: bool) -> anyhow::R
         repos.to_vec(),
     );
     std::thread::spawn(move || {
-        if let Err(e) = crate::watch::index_and_watch(&repos, s2, e2, v2, embed) {
+        if let Err(e) = crate::watch::index_and_watch(&repos, s2, e2, v2, embed, reanalyze) {
             eprintln!("codegraph: index/watch stopped: {e}");
         }
     });

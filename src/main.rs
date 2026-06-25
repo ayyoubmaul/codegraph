@@ -51,28 +51,40 @@ fn main() -> anyhow::Result<()> {
         Command::Important { db, k } => important(&db, k),
         Command::Communities { db, k } => communities(&db, k),
         Command::Watch { paths, db, embed } => watch::run(&paths, &db, embed),
-        Command::Serve { db, watch, embed } => serve_cmd(&db, &watch, embed),
+        Command::Serve {
+            db,
+            watch,
+            embed,
+            reanalyze,
+        } => serve_cmd(&db, &watch, embed, reanalyze),
         Command::Ui {
             db,
             port,
             watch,
             embed,
-        } => ui_cmd(&db, port, &watch, embed),
+            reanalyze,
+        } => ui_cmd(&db, port, &watch, embed, reanalyze),
     }
 }
 
-fn serve_cmd(db: &Path, watch: &[PathBuf], embed: bool) -> anyhow::Result<()> {
+fn serve_cmd(db: &Path, watch: &[PathBuf], embed: bool, reanalyze: Option<u64>) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     if watch.is_empty() {
         rt.block_on(mcp::serve(db))
     } else {
-        rt.block_on(mcp::serve_watch(db, watch, embed))
+        rt.block_on(mcp::serve_watch(db, watch, embed, reanalyze))
     }
 }
 
-fn ui_cmd(db: &Path, port: u16, watch: &[PathBuf], embed: bool) -> anyhow::Result<()> {
+fn ui_cmd(
+    db: &Path,
+    port: u16,
+    watch: &[PathBuf],
+    embed: bool,
+    reanalyze: Option<u64>,
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(ui::serve(db, port, watch, embed))
+    rt.block_on(ui::serve(db, port, watch, embed, reanalyze))
 }
 
 fn index(paths: &[PathBuf], json: bool, db: Option<&Path>, embed: bool) -> anyhow::Result<()> {

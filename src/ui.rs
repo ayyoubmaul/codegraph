@@ -27,7 +27,13 @@ struct AppState {
 
 /// Open the database and serve the web UI until interrupted. With `watch`, also
 /// index that repo and keep it live in a background thread sharing the store.
-pub async fn serve(db: &Path, port: u16, watch: &[PathBuf], embed: bool) -> anyhow::Result<()> {
+pub async fn serve(
+    db: &Path,
+    port: u16,
+    watch: &[PathBuf],
+    embed: bool,
+    reanalyze: Option<u64>,
+) -> anyhow::Result<()> {
     let store = LadybugStore::open(db)?;
     // Without --watch, build the vector index now from the existing db.
     let vindex_built = if watch.is_empty() {
@@ -45,7 +51,7 @@ pub async fn serve(db: &Path, port: u16, watch: &[PathBuf], embed: bool) -> anyh
     if !watch.is_empty() {
         let (s2, e2, v2, repos) = (store.clone(), embedder.clone(), vindex.clone(), watch.to_vec());
         std::thread::spawn(move || {
-            if let Err(e) = crate::watch::index_and_watch(&repos, s2, e2, v2, embed) {
+            if let Err(e) = crate::watch::index_and_watch(&repos, s2, e2, v2, embed, reanalyze) {
                 eprintln!("codegraph: index/watch stopped: {e}");
             }
         });
