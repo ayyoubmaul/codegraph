@@ -18,7 +18,11 @@ use crate::store::{DefHit, LadybugStore};
 
 #[derive(Clone)]
 pub struct CodegraphServer {
-    store: Arc<Mutex<LadybugStore>>,
+    /// Shared without a Rust lock — reads run concurrently with the background
+    /// watcher's writes (LadybugDB serializes writers internally).
+    store: Arc<LadybugStore>,
+    /// Dedicated to embedding *query* strings. Kept separate from the watcher's
+    /// batch embedder so a long batch embed never blocks a query.
     embedder: Arc<Mutex<Option<Embedder>>>,
     vindex: crate::vector::SharedVector,
     // Consumed by the `#[tool_handler]` macro expansion.
@@ -64,9 +68,9 @@ impl CodegraphServer {
         let embedder = Arc::new(Mutex::new(None));
         crate::embed::warm(embedder.clone());
         Ok(Self {
-            store: Arc::new(Mutex::new(store)),
+            store: Arc::new(store),
             embedder,
-            vindex: Arc::new(Mutex::new(vindex)),
+            vindex: Arc::new(tokio::sync::RwLock::new(vindex)),
             tool_router: Self::tool_router(),
         })
     }
@@ -74,7 +78,7 @@ impl CodegraphServer {
     /// Build from an already-shared store + embedder + vector index, so a
     /// background watcher can patch the same state this server queries.
     pub fn with_shared(
-        store: Arc<Mutex<LadybugStore>>,
+        store: Arc<LadybugStore>,
         embedder: Arc<Mutex<Option<Embedder>>>,
         vindex: crate::vector::SharedVector,
     ) -> Self {
@@ -106,10 +110,14 @@ impl CodegraphServer {
                 .map_err(internal)?
         };
         let hits = {
-            let store = self.store.lock().await;
-            let vindex = self.vindex.lock().await;
-            crate::vector::hybrid_search(&store, vindex.as_ref(), &query_vec, args.k.unwrap_or(8))
-                .map_err(internal)?
+            let vindex = self.vindex.read().await;
+            crate::vector::hybrid_search(
+                &self.store,
+                vindex.as_ref(),
+                &query_vec,
+                args.k.unwrap_or(8),
+            )
+            .map_err(internal)?
         };
         let mut out = String::new();
         for (h, sim) in &hits {
@@ -126,10 +134,7 @@ impl CodegraphServer {
         &self,
         Parameters(args): Parameters<NameArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let hits = {
-            let store = self.store.lock().await;
-            store.who_calls(&args.name).map_err(internal)?
-        };
+        let hits = self.store.who_calls(&args.name).map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(format_hits(
             &hits, &args.name, "callers",
         ))]))
@@ -142,12 +147,10 @@ impl CodegraphServer {
         &self,
         Parameters(args): Parameters<CallChainArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let hits = {
-            let store = self.store.lock().await;
-            store
-                .call_chain(&args.name, args.depth.unwrap_or(3))
-                .map_err(internal)?
-        };
+        let hits = self
+            .store
+            .call_chain(&args.name, args.depth.unwrap_or(3))
+            .map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(format_hits(
             &hits, &args.name, "reachable",
         ))]))
@@ -160,10 +163,10 @@ impl CodegraphServer {
         &self,
         Parameters(args): Parameters<TopKArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let hits = {
-            let store = self.store.lock().await;
-            store.top_important(args.k.unwrap_or(10)).map_err(internal)?
-        };
+        let hits = self
+            .store
+            .top_important(args.k.unwrap_or(10))
+            .map_err(internal)?;
         let mut out = String::new();
         for (h, pr) in &hits {
             out.push_str(&format!("{pr:.4}  {}  {}:{}\n", h.name, h.file, h.start_line));
@@ -222,26 +225,26 @@ pub async fn serve_watch(
     embed: bool,
     reanalyze: Option<u64>,
 ) -> anyhow::Result<()> {
-    let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(LadybugStore::open(db)?));
-    let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
-    let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(None));
+    let store: Arc<LadybugStore> = Arc::new(LadybugStore::open(db)?);
+    let vindex: crate::vector::SharedVector = Arc::new(tokio::sync::RwLock::new(None));
+
+    // Two embedders: the server embeds *query* strings, the watcher embeds
+    // *definition batches*. Separate so a long batch embed (initial index of a
+    // big workspace) never blocks a query embed.
+    let query_embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
+    let watch_embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
 
     // Index + watch on a background thread so the MCP server starts answering
     // immediately (no startup index → no handshake timeout). Tools return
     // partial results until the initial index completes, then full + live.
-    let (s2, e2, v2, repos) = (
-        store.clone(),
-        embedder.clone(),
-        vindex.clone(),
-        repos.to_vec(),
-    );
+    let (s2, v2, repos) = (store.clone(), vindex.clone(), repos.to_vec());
     std::thread::spawn(move || {
-        if let Err(e) = crate::watch::index_and_watch(&repos, s2, e2, v2, embed, reanalyze) {
+        if let Err(e) = crate::watch::index_and_watch(&repos, s2, watch_embedder, v2, embed, reanalyze) {
             eprintln!("codegraph: index/watch stopped: {e}");
         }
     });
 
-    let service = CodegraphServer::with_shared(store, embedder, vindex)
+    let service = CodegraphServer::with_shared(store, query_embedder, vindex)
         .serve(stdio())
         .await?;
     service.waiting().await?;

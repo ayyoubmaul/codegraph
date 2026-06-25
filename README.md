@@ -255,6 +255,16 @@ Built as vertical slices — each one builds and runs. ✅ = shipped.
       graph. **`--reanalyze <secs>`** re-runs analyze (PageRank/communities) on a
       timer *inside* the server, so even those stay fresh. One process indexes,
       watches, serves, and refreshes analytics.
+- [x] **Slice 15 — concurrency / scalability.** Reads no longer queue behind
+      background writes. The store is shared lock-free (`Arc<LadybugStore>`,
+      relying on LadybugDB's internal single-writer + concurrent-reader model)
+      instead of one global `Mutex`, so live indexing, batch embedding, and
+      periodic `--reanalyze` over a large multi-repo workspace can't starve MCP
+      tool calls. PageRank/Louvain compute lock-free (only the final write is
+      serialized); query embedding uses a dedicated embedder; read queries carry
+      a timeout so a tool call fails fast instead of hanging. Verified: ~9k
+      queries answered with ~6 ms max latency *while* a writer hammered the same
+      store (regression test `reads_stay_responsive_under_concurrent_writes`).
 
 </details>
 

@@ -8,13 +8,26 @@
 //! batch the write stage).
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use lbug::{Connection, Database, LogicalType, SystemConfig, Value};
 
 use crate::graph::{EdgeKind, GraphBatch, NodeKind, Store};
 
+/// Per-query wall-clock cap for *agent-facing* read queries (search, who_calls,
+/// call_chain, important). Bounds a pathological query so an MCP/UI tool call
+/// fails fast instead of hanging the agent. Background reads (analyze, vector
+/// build) use the untimed [`LadybugStore::connect`].
+const READ_TIMEOUT_MS: u64 = 10_000;
+
 pub struct LadybugStore {
     db: Database,
+    /// Serializes *writers* among themselves (LadybugDB allows a single writer
+    /// at a time). Readers never take this — they run concurrently against the
+    /// shared `Database`, which gives them committed-snapshot reads. This is the
+    /// whole point of dropping the old `Arc<Mutex<LadybugStore>>`: a long write
+    /// (initial index, batch embed, reanalyze) no longer blocks queries.
+    write_lock: Mutex<()>,
 }
 
 /// A definition row returned by a query.
@@ -41,13 +54,24 @@ impl LadybugStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let db = Database::new(path, SystemConfig::default())
             .map_err(|e| anyhow::anyhow!("open LadybugDB at {}: {e}", path.display()))?;
-        let mut store = Self { db };
+        let store = Self {
+            db,
+            write_lock: Mutex::new(()),
+        };
         store.init_schema()?;
         Ok(store)
     }
 
     fn connect(&self) -> anyhow::Result<Connection<'_>> {
         Connection::new(&self.db).map_err(|e| anyhow::anyhow!("lbug connect: {e}"))
+    }
+
+    /// A connection for an agent-facing read query, capped at [`READ_TIMEOUT_MS`]
+    /// so a slow/pathological query returns an error rather than hanging.
+    fn read_conn(&self) -> anyhow::Result<Connection<'_>> {
+        let conn = self.connect()?;
+        conn.set_query_timeout(READ_TIMEOUT_MS);
+        Ok(conn)
     }
 
     /// `(files, defs, defines, calls, imports)` currently stored.
@@ -63,7 +87,7 @@ impl LadybugStore {
 
     /// Direct callers of any definition named `name`.
     pub fn who_calls(&self, name: &str) -> anyhow::Result<Vec<DefHit>> {
-        let conn = self.connect()?;
+        let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
                 "MATCH (caller:Def)-[:Calls]->(callee:Def {name: $name}) \
@@ -81,7 +105,7 @@ impl LadybugStore {
     /// hops (clamped to 1..=10).
     pub fn call_chain(&self, name: &str, depth: u8) -> anyhow::Result<Vec<DefHit>> {
         let depth = depth.clamp(1, 10);
-        let conn = self.connect()?;
+        let conn = self.read_conn()?;
         // `depth` is a validated integer, safe to interpolate; `name` is a param.
         let query = format!(
             "MATCH (:Def {{name: $name}})-[:Calls*1..{depth}]->(d:Def) \
@@ -98,7 +122,8 @@ impl LadybugStore {
     }
 
     /// Store an embedding vector for each `(def_id, vector)` pair.
-    pub fn set_embeddings(&mut self, items: &[(String, Vec<f32>)]) -> anyhow::Result<()> {
+    pub fn set_embeddings(&self, items: &[(String, Vec<f32>)]) -> anyhow::Result<()> {
+        let _w = self.write_lock.lock().unwrap();
         let conn = self.connect()?;
         conn.query("BEGIN TRANSACTION")
             .map_err(|e| anyhow::anyhow!("lbug begin: {e}"))?;
@@ -125,7 +150,7 @@ impl LadybugStore {
     /// similar to `query`, each with its similarity score.
     pub fn semantic_search(&self, query: &[f32], k: usize) -> anyhow::Result<Vec<(DefHit, f32)>> {
         let k = k.clamp(1, 100);
-        let conn = self.connect()?;
+        let conn = self.read_conn()?;
         let q = Value::Array(
             LogicalType::Float,
             query.iter().map(|f| Value::Float(*f)).collect(),
@@ -181,7 +206,8 @@ impl LadybugStore {
     }
 
     /// Store `(def_id, pagerank, community)` analysis results.
-    pub fn set_analysis(&mut self, items: &[(String, f64, i64)]) -> anyhow::Result<()> {
+    pub fn set_analysis(&self, items: &[(String, f64, i64)]) -> anyhow::Result<()> {
+        let _w = self.write_lock.lock().unwrap();
         let conn = self.connect()?;
         conn.query("BEGIN TRANSACTION")
             .map_err(|e| anyhow::anyhow!("lbug begin: {e}"))?;
@@ -207,7 +233,7 @@ impl LadybugStore {
     /// The `k` most important definitions by PageRank (with their score).
     pub fn top_important(&self, k: usize) -> anyhow::Result<Vec<(DefHit, f32)>> {
         let k = k.clamp(1, 200);
-        let conn = self.connect()?;
+        let conn = self.read_conn()?;
         let mut result = conn
             .query(&format!(
                 "MATCH (d:Def) WHERE d.pagerank IS NOT NULL \
@@ -296,6 +322,7 @@ impl LadybugStore {
     /// fresh index. Writes temp CSVs under `tmp_dir`. `COPY` runs once per table,
     /// so callers use this only when the database is empty.
     pub fn bulk_load(&self, batch: &GraphBatch, tmp_dir: &Path) -> anyhow::Result<()> {
+        let _w = self.write_lock.lock().unwrap();
         std::fs::create_dir_all(tmp_dir)?;
         let mut file_csv = String::new();
         let mut def_csv = String::new();
@@ -396,7 +423,7 @@ impl LadybugStore {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.connect()?;
+        let conn = self.read_conn()?;
         let list = Value::List(
             LogicalType::String,
             ids.iter().map(|s| Value::String(s.clone())).collect(),
@@ -485,7 +512,8 @@ impl LadybugStore {
 }
 
 impl Store for LadybugStore {
-    fn init_schema(&mut self) -> anyhow::Result<()> {
+    fn init_schema(&self) -> anyhow::Result<()> {
+        let _w = self.write_lock.lock().unwrap();
         let conn = self.connect()?;
         for ddl in [
             "CREATE NODE TABLE IF NOT EXISTS File(path STRING, PRIMARY KEY(path))",
@@ -502,7 +530,8 @@ impl Store for LadybugStore {
         Ok(())
     }
 
-    fn write_batch(&mut self, batch: &GraphBatch) -> anyhow::Result<()> {
+    fn write_batch(&self, batch: &GraphBatch) -> anyhow::Result<()> {
+        let _w = self.write_lock.lock().unwrap();
         let conn = self.connect()?;
         conn.query("BEGIN TRANSACTION")
             .map_err(|e| anyhow::anyhow!("lbug begin: {e}"))?;
@@ -590,7 +619,8 @@ impl Store for LadybugStore {
         Ok(())
     }
 
-    fn remove_file(&mut self, rel_path: &str) -> anyhow::Result<()> {
+    fn remove_file(&self, rel_path: &str) -> anyhow::Result<()> {
+        let _w = self.write_lock.lock().unwrap();
         let conn = self.connect()?;
         let mut del_defs = conn
             .prepare("MATCH (:File {path: $path})-[:Defines]->(d:Def) DETACH DELETE d")
@@ -666,4 +696,123 @@ fn row_to_hit_score(row: Vec<Value>) -> Option<(DefHit, f32)> {
         },
         sim,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{Edge, GraphBatch, Node, NodeKind};
+    use crate::symbol::SymbolKind;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A batch of `n` defs in one file, every def calling `fn0` — so
+    /// `who_calls("fn0")` returns `n - 1`.
+    fn fixture(n: usize) -> (GraphBatch, Vec<String>) {
+        let file = "repo/a.rs".to_string();
+        let mut nodes = vec![Node {
+            id: file.clone(),
+            kind: NodeKind::File,
+            name: file.clone(),
+            file: file.clone(),
+            symbol_kind: None,
+            start_line: 0,
+            end_line: 0,
+        }];
+        let mut edges = Vec::new();
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let name = format!("fn{i}");
+            let id = GraphBatch::def_id(&file, &name, i);
+            ids.push(id.clone());
+            nodes.push(Node {
+                id: id.clone(),
+                kind: NodeKind::Definition,
+                name,
+                file: file.clone(),
+                symbol_kind: Some(SymbolKind::Function),
+                start_line: i,
+                end_line: i,
+            });
+            edges.push(Edge { from: file.clone(), to: id.clone(), kind: EdgeKind::Defines });
+        }
+        let callee = ids[0].clone();
+        for id in ids.iter().skip(1) {
+            edges.push(Edge { from: id.clone(), to: callee.clone(), kind: EdgeKind::Calls });
+        }
+        (GraphBatch { nodes, edges }, ids)
+    }
+
+    /// The core guarantee of the lock-free-reads design: while a writer hammers
+    /// the store, reads keep returning promptly and consistently — they are not
+    /// serialized behind the writer. Regression guard for the MCP timeout issue.
+    #[test]
+    fn reads_stay_responsive_under_concurrent_writes() {
+        let n = 400;
+        let (batch, ids) = fixture(n);
+        let dir = std::env::temp_dir().join(format!(
+            "codegraph-test-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let store = Arc::new(LadybugStore::open(&dir).expect("open db"));
+        store.write_batch(&batch).expect("seed write");
+
+        let analysis: Vec<(String, f64, i64)> =
+            ids.iter().map(|id| (id.clone(), 1.0 / n as f64, 0)).collect();
+
+        // Writer thread: repeated set_analysis + write_batch, each taking the
+        // internal write lock. ~20 iterations keeps the test ~1–2s.
+        let done = Arc::new(AtomicBool::new(false));
+        let (w_store, w_done, w_batch, w_analysis) =
+            (store.clone(), done.clone(), batch, analysis);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..20 {
+                w_store.set_analysis(&w_analysis).expect("set_analysis");
+                w_store.write_batch(&w_batch).expect("write_batch");
+            }
+            w_done.store(true, Ordering::SeqCst);
+        });
+
+        // Reader: query repeatedly until the writer finishes, recording how many
+        // reads landed *while the writer was still running* and the slowest one.
+        let mut reads_during_write = 0usize;
+        let mut max_latency = Duration::ZERO;
+        let mut total_reads = 0usize;
+        while !done.load(Ordering::SeqCst) {
+            let t = Instant::now();
+            let callers = store.who_calls("fn0").expect("who_calls");
+            let count = store.def_count().expect("def_count");
+            let dt = t.elapsed();
+            max_latency = max_latency.max(dt);
+            assert_eq!(callers.len(), n - 1, "every fn except fn0 calls fn0");
+            assert_eq!(count, n as u64, "all defs present");
+            reads_during_write += 1;
+            total_reads += 1;
+        }
+        writer.join().expect("writer thread");
+        // A few more reads after the writer is done, for good measure.
+        for _ in 0..5 {
+            assert_eq!(store.who_calls("fn0").expect("who_calls").len(), n - 1);
+            total_reads += 1;
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Reads overlapped the writer (not serialized behind the whole loop)...
+        assert!(
+            reads_during_write >= 5,
+            "expected reads to interleave with writes, got {reads_during_write}"
+        );
+        // ...and no single read came anywhere near the 10s read timeout.
+        assert!(
+            max_latency < Duration::from_secs(5),
+            "slow read under contention: {max_latency:?}"
+        );
+        eprintln!(
+            "concurrency ok: {total_reads} reads ({reads_during_write} during writes), \
+             max read latency {max_latency:?}"
+        );
+    }
 }

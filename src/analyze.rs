@@ -11,10 +11,18 @@ use crate::store::LadybugStore;
 
 /// Load the call graph, compute PageRank + communities, and store them back.
 /// Returns `(num_defs, num_communities)`.
-pub fn run(store: &mut LadybugStore, iters: usize) -> anyhow::Result<(usize, usize)> {
+///
+/// Takes `&LadybugStore` (not `&mut`) and holds no store lock across the heavy
+/// part: the edge list is read with concurrent-read connections, PageRank and
+/// Louvain run purely in memory with **no lock at all** (seconds, on a big
+/// workspace), and only the final `set_analysis` write briefly serializes
+/// against other writers. So a periodic re-analyze never blocks live queries.
+pub fn run(store: &LadybugStore, iters: usize) -> anyhow::Result<(usize, usize)> {
+    // --- read phase (concurrent-safe reads) ---
     let ids = store.def_ids()?;
     let raw_edges = store.call_edges()?;
 
+    // --- compute phase (lock-free, pure CPU) ---
     let mut index: HashMap<&str, usize> = HashMap::new();
     for (i, id) in ids.iter().enumerate() {
         index.insert(id.as_str(), i);
@@ -29,6 +37,7 @@ pub fn run(store: &mut LadybugStore, iters: usize) -> anyhow::Result<(usize, usi
     let comm = louvain(n, &edges);
     let num_comm = comm.iter().copied().max().map(|m| m + 1).unwrap_or(0);
 
+    // --- write phase (brief writer-serialized transaction) ---
     let items: Vec<(String, f64, i64)> = (0..n)
         .map(|i| (ids[i].clone(), pr[i], comm[i] as i64))
         .collect();

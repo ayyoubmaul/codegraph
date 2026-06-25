@@ -24,7 +24,10 @@ use crate::vector::SharedVector;
 use crate::walk;
 
 pub type Cache = HashMap<String, ParseResult>;
-pub type SharedStore = Arc<Mutex<LadybugStore>>;
+/// The store is shared *without* a Rust lock: `LadybugStore` is `Sync` and
+/// serializes writers internally, so readers (the MCP/UI query handlers) run
+/// concurrently with the watcher's writes instead of queueing behind them.
+pub type SharedStore = Arc<LadybugStore>;
 pub type SharedEmbedder = Arc<Mutex<Option<Embedder>>>;
 /// `(canonical root, repo prefix)` for each watched repo.
 type Roots = Vec<(PathBuf, String)>;
@@ -32,11 +35,11 @@ type Roots = Vec<(PathBuf, String)>;
 /// Standalone `watch` command: own the store, index all roots, watch forever.
 pub fn run(paths: &[PathBuf], db: &Path, embed_on: bool) -> anyhow::Result<()> {
     let (roots, cache) = prepare(paths)?;
-    let mut store = LadybugStore::open(db)?;
+    let store = LadybugStore::open(db)?;
     let mut embedder: Option<Embedder> = None;
     let batch = build_full(&cache);
     if store.def_count()? == 0 {
-        bulk_or_tmp(&mut store, &batch)?;
+        bulk_or_tmp(&store, &batch)?;
     } else {
         store.write_batch(&batch)?;
     }
@@ -48,7 +51,7 @@ pub fn run(paths: &[PathBuf], db: &Path, embed_on: bool) -> anyhow::Result<()> {
         let items = embed::embed_defs(embedder.as_mut().unwrap(), &batch, &already)?;
         store.set_embeddings(&items)?;
     }
-    let store: SharedStore = Arc::new(Mutex::new(store));
+    let store: SharedStore = Arc::new(store);
     let embedder: SharedEmbedder = Arc::new(Mutex::new(embedder));
     watch_only(roots, cache, store, embedder, embed_on, None)
 }
@@ -65,16 +68,13 @@ pub fn index_and_watch(
 ) -> anyhow::Result<()> {
     let (roots, cache) = prepare(paths)?;
     let batch = build_full(&cache);
-    {
-        let mut s = store.blocking_lock();
-        if s.def_count()? == 0 {
-            bulk_or_tmp(&mut s, &batch)?;
-        } else {
-            s.write_batch(&batch)?;
-        }
+    if store.def_count()? == 0 {
+        bulk_or_tmp(&store, &batch)?;
+    } else {
+        store.write_batch(&batch)?;
     }
     if embed_on {
-        let already = store.blocking_lock().embedded_ids()?;
+        let already = store.embedded_ids()?;
         let items = {
             let mut guard = embedder.blocking_lock();
             if guard.is_none() {
@@ -83,15 +83,12 @@ pub fn index_and_watch(
             embed::embed_defs(guard.as_mut().unwrap(), &batch, &already)?
         };
         if !items.is_empty() {
-            store.blocking_lock().set_embeddings(&items)?;
+            store.set_embeddings(&items)?;
         }
     }
     {
-        let built = {
-            let s = store.blocking_lock();
-            crate::vector::build_from_store(&s)?
-        };
-        *vindex.blocking_lock() = built;
+        let built = crate::vector::build_from_store(&store)?;
+        *vindex.blocking_write() = built;
     }
     eprintln!(
         "codegraph: indexed {} files across {} repo(s)",
@@ -100,14 +97,15 @@ pub fn index_and_watch(
     );
 
     // Periodically re-run analyze (PageRank/communities are batch, not
-    // incremental) on a background thread sharing the store.
+    // incremental) on a background thread sharing the store. `analyze::run`
+    // takes `&LadybugStore` and computes lock-free — only its final write
+    // briefly serializes against other writers — so this never blocks queries.
     if let Some(secs) = reanalyze {
         let s = store.clone();
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_secs(secs.max(1)));
-                let mut guard = s.blocking_lock();
-                match crate::analyze::run(&mut guard, 30) {
+                match crate::analyze::run(&s, 30) {
                     Ok((n, c)) => eprintln!("codegraph: re-analyzed {n} defs → {c} communities"),
                     Err(e) => eprintln!("codegraph: re-analyze failed: {e}"),
                 }
@@ -217,7 +215,7 @@ fn rel_for(roots: &Roots, path: &Path) -> Option<String> {
     None
 }
 
-fn bulk_or_tmp(store: &mut LadybugStore, batch: &GraphBatch) -> anyhow::Result<()> {
+fn bulk_or_tmp(store: &LadybugStore, batch: &GraphBatch) -> anyhow::Result<()> {
     let tmp = std::env::temp_dir().join(format!("codegraph-bulk-{}", std::process::id()));
     store.bulk_load(batch, &tmp)?;
     let _ = std::fs::remove_dir_all(&tmp);
@@ -226,7 +224,7 @@ fn bulk_or_tmp(store: &mut LadybugStore, batch: &GraphBatch) -> anyhow::Result<(
 
 fn remove(store: &SharedStore, cache: &mut Cache, rel: &str) {
     if cache.remove(rel).is_some() {
-        match store.blocking_lock().remove_file(rel) {
+        match store.remove_file(rel) {
             Ok(()) => eprintln!("- {rel}"),
             Err(e) => eprintln!("codegraph: remove {rel} failed: {e}"),
         }
@@ -260,11 +258,11 @@ fn update_file(
         .filter(|n| n.kind == NodeKind::Definition)
         .count();
 
-    {
-        let mut s = store.blocking_lock();
-        s.remove_file(rel)?;
-        s.write_batch(&sub)?;
-    }
+    // Re-point the file's sub-graph: one writer-serialized transaction would be
+    // ideal, but remove+write are two; readers still only ever see committed
+    // state, and the window is tiny (one file's nodes/edges).
+    store.remove_file(rel)?;
+    store.write_batch(&sub)?;
     if embed_on {
         let skip = std::collections::HashSet::new();
         let items = {
@@ -275,9 +273,9 @@ fn update_file(
             embed::embed_defs(guard.as_mut().unwrap(), &sub, &skip)?
         };
         if !items.is_empty() {
-            store.blocking_lock().set_embeddings(&items)?;
+            store.set_embeddings(&items)?;
             if let Some(vi) = vindex {
-                let mut guard = vi.blocking_lock();
+                let mut guard = vi.blocking_write();
                 if let Some(idx) = guard.as_mut() {
                     for (id, vec) in &items {
                         idx.add(id, vec);

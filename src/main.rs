@@ -122,7 +122,7 @@ fn index(paths: &[PathBuf], json: bool, db: Option<&Path>, embed: bool) -> anyho
 
     if let Some(db_path) = db {
         let persist_start = Instant::now();
-        let mut store = store::LadybugStore::open(db_path)?;
+        let store = store::LadybugStore::open(db_path)?;
         // Fresh DB → fast bulk CSV load; existing DB → incremental MERGE.
         if store.def_count()? == 0 {
             let tmp = std::env::temp_dir().join(format!("codegraph-bulk-{}", std::process::id()));
@@ -234,9 +234,9 @@ fn search(query: &str, db: &Path, k: usize) -> anyhow::Result<()> {
 }
 
 fn analyze_cmd(db: &Path, iters: usize) -> anyhow::Result<()> {
-    let mut store = store::LadybugStore::open(db)?;
+    let store = store::LadybugStore::open(db)?;
     let start = Instant::now();
-    let (defs, communities) = analyze::run(&mut store, iters)?;
+    let (defs, communities) = analyze::run(&store, iters)?;
     println!(
         "analyzed {defs} defs → {communities} communities + PageRank in {:.2?}",
         start.elapsed()

@@ -328,9 +328,14 @@ fn resolve_relative_import(
 #[allow(dead_code)]
 pub trait Store {
     /// Create node/edge tables and indexes if absent.
-    fn init_schema(&mut self) -> anyhow::Result<()>;
+    ///
+    /// Takes `&self`: the concrete store (LadybugDB) routes every mutation
+    /// through a short-lived `Connection` and serializes writers with its own
+    /// internal lock, so callers can share it as `Arc<Store>` and let reads run
+    /// concurrently with writes.
+    fn init_schema(&self) -> anyhow::Result<()>;
     /// Upsert every node and edge in `batch`.
-    fn write_batch(&mut self, batch: &GraphBatch) -> anyhow::Result<()>;
+    fn write_batch(&self, batch: &GraphBatch) -> anyhow::Result<()>;
     /// Drop a file's nodes and edges (used by incremental re-indexing).
-    fn remove_file(&mut self, rel_path: &str) -> anyhow::Result<()>;
+    fn remove_file(&self, rel_path: &str) -> anyhow::Result<()>;
 }

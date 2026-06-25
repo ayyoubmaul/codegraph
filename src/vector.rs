@@ -9,11 +9,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use hnsw_rs::prelude::*;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::store::{DefHit, LadybugStore};
 
-pub type SharedVector = Arc<Mutex<Option<VectorIndex>>>;
+/// Shared HNSW index. An `RwLock` (not `Mutex`) so concurrent searches take a
+/// read lock and don't serialize against each other; only the watcher adding a
+/// new vector (or a rebuild swap) takes the write lock, briefly.
+pub type SharedVector = Arc<RwLock<Option<VectorIndex>>>;
 
 pub struct VectorIndex {
     hnsw: Hnsw<'static, f32, DistCosine>,

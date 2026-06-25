@@ -13,14 +13,16 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::embed::Embedder;
 use crate::graph::GraphBatch;
 use crate::store::LadybugStore;
 
 struct AppState {
-    store: Arc<Mutex<LadybugStore>>,
+    /// Shared lock-free — reads run concurrently with the background watcher.
+    store: Arc<LadybugStore>,
+    /// Dedicated query embedder (separate from the watcher's batch embedder).
     embedder: Arc<Mutex<Option<Embedder>>>,
     vindex: crate::vector::SharedVector,
 }
@@ -42,16 +44,21 @@ pub async fn serve(
         None
     };
 
-    let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(store));
+    let store: Arc<LadybugStore> = Arc::new(store);
+    // Dedicated query embedder for /api/search; warmed eagerly.
     let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
     crate::embed::warm(embedder.clone());
-    let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(vindex_built));
+    let vindex: crate::vector::SharedVector = Arc::new(RwLock::new(vindex_built));
 
     // With --watch, index + watch on a background thread so the UI serves now.
+    // The watcher gets its own batch embedder, separate from the query one above.
     if !watch.is_empty() {
-        let (s2, e2, v2, repos) = (store.clone(), embedder.clone(), vindex.clone(), watch.to_vec());
+        let watch_embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
+        let (s2, v2, repos) = (store.clone(), vindex.clone(), watch.to_vec());
         std::thread::spawn(move || {
-            if let Err(e) = crate::watch::index_and_watch(&repos, s2, e2, v2, embed, reanalyze) {
+            if let Err(e) =
+                crate::watch::index_and_watch(&repos, s2, watch_embedder, v2, embed, reanalyze)
+            {
                 eprintln!("codegraph: index/watch stopped: {e}");
             }
         });
@@ -83,9 +90,8 @@ async fn index() -> Html<&'static str> {
 /// The call graph: definition nodes (with community + pagerank) that take part
 /// in at least one call edge, and the edges between them.
 async fn graph(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, AppError> {
-    let store = state.store.lock().await;
-    let nodes = store.graph_nodes()?;
-    let edges = store.call_edges()?;
+    let nodes = state.store.graph_nodes()?;
+    let edges = state.store.call_edges()?;
 
     let mut incident: HashSet<&str> = HashSet::new();
     for (a, b) in &edges {
@@ -123,9 +129,8 @@ async fn search(
         guard.as_mut().unwrap().embed_one(&p.q)?
     };
     let hits = {
-        let store = state.store.lock().await;
-        let vindex = state.vindex.lock().await;
-        crate::vector::hybrid_search(&store, vindex.as_ref(), &query_vec, p.k.unwrap_or(15))?
+        let vindex = state.vindex.read().await;
+        crate::vector::hybrid_search(&state.store, vindex.as_ref(), &query_vec, p.k.unwrap_or(15))?
     };
     let hits: Vec<_> = hits
         .iter()
