@@ -44,11 +44,16 @@ fn main() -> anyhow::Result<()> {
             db,
             embed,
         } => index(&paths, json, db.as_deref(), embed),
-        Command::Search { query, db, k } => search(&query, &db, k),
-        Command::WhoCalls { name, db } => who_calls(&name, &db),
-        Command::CallChain { name, db, depth } => call_chain(&name, &db, depth),
+        Command::Search { query, db, k, repo } => search(&query, &db, k, repo.as_deref()),
+        Command::WhoCalls { name, db, repo } => who_calls(&name, &db, repo.as_deref()),
+        Command::CallChain {
+            name,
+            db,
+            depth,
+            repo,
+        } => call_chain(&name, &db, depth, repo.as_deref()),
         Command::Analyze { db, iters } => analyze_cmd(&db, iters),
-        Command::Important { db, k } => important(&db, k),
+        Command::Important { db, k, repo } => important(&db, k, repo.as_deref()),
         Command::Communities { db, k } => communities(&db, k),
         Command::Watch { paths, db, embed } => watch::run(&paths, &db, embed),
         Command::Serve {
@@ -186,9 +191,9 @@ fn index(paths: &[PathBuf], json: bool, db: Option<&Path>, embed: bool) -> anyho
     Ok(())
 }
 
-fn who_calls(name: &str, db: &Path) -> anyhow::Result<()> {
+fn who_calls(name: &str, db: &Path, repo: Option<&str>) -> anyhow::Result<()> {
     let store = store::LadybugStore::open(db)?;
-    let hits = store.who_calls(name)?;
+    let hits = store.who_calls(name, repo)?;
     if hits.is_empty() {
         println!("no callers of `{name}` found");
     } else {
@@ -200,9 +205,9 @@ fn who_calls(name: &str, db: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn call_chain(name: &str, db: &Path, depth: u8) -> anyhow::Result<()> {
+fn call_chain(name: &str, db: &Path, depth: u8, repo: Option<&str>) -> anyhow::Result<()> {
     let store = store::LadybugStore::open(db)?;
-    let hits = store.call_chain(name, depth)?;
+    let hits = store.call_chain(name, depth, repo)?;
     if hits.is_empty() {
         println!("`{name}` reaches nothing within depth {depth}");
     } else {
@@ -217,11 +222,11 @@ fn call_chain(name: &str, db: &Path, depth: u8) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn search(query: &str, db: &Path, k: usize) -> anyhow::Result<()> {
+fn search(query: &str, db: &Path, k: usize, repo: Option<&str>) -> anyhow::Result<()> {
     let store = store::LadybugStore::open(db)?;
     let mut embedder = embed::Embedder::new()?;
     let q = embedder.embed_one(query)?;
-    let hits = store.semantic_search(&q, k)?;
+    let hits = store.semantic_search(&q, k, repo)?;
     if hits.is_empty() {
         println!("no results for `{query}` (did you index with --embed?)");
     } else {
@@ -244,9 +249,9 @@ fn analyze_cmd(db: &Path, iters: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn important(db: &Path, k: usize) -> anyhow::Result<()> {
+fn important(db: &Path, k: usize, repo: Option<&str>) -> anyhow::Result<()> {
     let store = store::LadybugStore::open(db)?;
-    let hits = store.top_important(k)?;
+    let hits = store.top_important(k, repo)?;
     if hits.is_empty() {
         println!("no analysis yet — run `analyze` first");
     } else {

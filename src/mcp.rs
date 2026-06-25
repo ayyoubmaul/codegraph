@@ -37,12 +37,19 @@ struct SearchArgs {
     /// Max number of results (default 8).
     #[serde(default)]
     k: Option<usize>,
+    /// Optional: restrict results to one repo in the workspace, by its name
+    /// (e.g. "my-repo"). Omit to search the whole workspace.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct NameArgs {
     /// The exact symbol name (function/method/type).
     name: String,
+    /// Optional: restrict to callers in one repo (by name, e.g. "api").
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -52,6 +59,9 @@ struct CallChainArgs {
     /// Max hops to traverse (default 3).
     #[serde(default)]
     depth: Option<u8>,
+    /// Optional: restrict reachable defs to one repo (by name).
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -59,6 +69,10 @@ struct TopKArgs {
     /// Number of results (default 10).
     #[serde(default)]
     k: Option<usize>,
+    /// Optional: rank importance within a single repo (by name, e.g.
+    /// "my-repo") instead of across the whole workspace.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 #[tool_router]
@@ -92,7 +106,7 @@ impl CodegraphServer {
     }
 
     #[tool(
-        description = "Semantic search: find definitions by meaning, not just name (e.g. 'rate limiting logic'). Returns ranked name, location, and similarity."
+        description = "Semantic search: find definitions by meaning, not just name (e.g. 'rate limiting logic'). Returns ranked name, location, and similarity. Pass `repo` to scope to one repo in the workspace."
     )]
     async fn search(
         &self,
@@ -116,6 +130,7 @@ impl CodegraphServer {
                 vindex.as_ref(),
                 &query_vec,
                 args.k.unwrap_or(8),
+                args.repo.as_deref(),
             )
             .map_err(internal)?
         };
@@ -134,7 +149,10 @@ impl CodegraphServer {
         &self,
         Parameters(args): Parameters<NameArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let hits = self.store.who_calls(&args.name).map_err(internal)?;
+        let hits = self
+            .store
+            .who_calls(&args.name, args.repo.as_deref())
+            .map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(format_hits(
             &hits, &args.name, "callers",
         ))]))
@@ -149,7 +167,7 @@ impl CodegraphServer {
     ) -> Result<CallToolResult, McpError> {
         let hits = self
             .store
-            .call_chain(&args.name, args.depth.unwrap_or(3))
+            .call_chain(&args.name, args.depth.unwrap_or(3), args.repo.as_deref())
             .map_err(internal)?;
         Ok(CallToolResult::success(vec![Content::text(format_hits(
             &hits, &args.name, "reachable",
@@ -157,7 +175,7 @@ impl CodegraphServer {
     }
 
     #[tool(
-        description = "Most important (most-depended-on) definitions by PageRank. Requires `analyze` to have been run on the database."
+        description = "Most important (most-depended-on) definitions by PageRank. Requires `analyze` to have been run on the database. Pass `repo` to rank within one repo instead of the whole workspace."
     )]
     async fn important(
         &self,
@@ -165,7 +183,7 @@ impl CodegraphServer {
     ) -> Result<CallToolResult, McpError> {
         let hits = self
             .store
-            .top_important(args.k.unwrap_or(10))
+            .top_important(args.k.unwrap_or(10), args.repo.as_deref())
             .map_err(internal)?;
         let mut out = String::new();
         for (h, pr) in &hits {
@@ -186,7 +204,9 @@ impl ServerHandler for CodegraphServer {
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(
             "codegraph: a structural + semantic code graph. Tools: search (find code by \
-             meaning), who_calls, call_chain, important (PageRank)."
+             meaning), who_calls, call_chain, important (PageRank). In a multi-repo \
+             workspace, pass the optional `repo` arg (a repo name, e.g. \
+             'my-repo') to scope any tool to a single repo."
                 .into(),
         );
         info

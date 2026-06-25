@@ -88,14 +88,20 @@ pub fn build_from_store(store: &LadybugStore) -> anyhow::Result<Option<VectorInd
 
 /// Semantic search: use the HNSW index if present (joining metadata from the
 /// graph DB), else fall back to the DB's brute-force cosine search.
+///
+/// The HNSW index is workspace-global and can't be cheaply repo-filtered (its
+/// top-k neighbours might all sit outside the target repo), so when `repo` is
+/// given we use the DB's **scoped** brute-force instead — it only scans that
+/// repo's embedded defs, so it stays fast even on a 30-repo workspace.
 pub fn hybrid_search(
     store: &LadybugStore,
     vindex: Option<&VectorIndex>,
     query: &[f32],
     k: usize,
+    repo: Option<&str>,
 ) -> anyhow::Result<Vec<(DefHit, f32)>> {
     match vindex {
-        Some(vi) if vi.len() > 0 => {
+        Some(vi) if vi.len() > 0 && repo.is_none() => {
             // Over-fetch so orphaned ids (deleted defs) can be filtered out.
             let hits = vi.search(query, k * 2);
             let ids: Vec<String> = hits.iter().map(|(id, _)| id.clone()).collect();
@@ -111,6 +117,6 @@ pub fn hybrid_search(
             }
             Ok(out)
         }
-        _ => store.semantic_search(query, k),
+        _ => store.semantic_search(query, k, repo),
     }
 }

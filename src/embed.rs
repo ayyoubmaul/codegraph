@@ -5,12 +5,32 @@
 //! offline — no API keys, no per-query network.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use tokio::sync::Mutex;
 
 use crate::graph::{GraphBatch, NodeKind};
+
+/// Absolute, CWD-independent cache dir for the embedding model.
+///
+/// fastembed defaults to `./.fastembed_cache`, *relative to the process working
+/// directory*. A long-running `serve`/`ui` is launched by clients (opencode,
+/// Claude Code) from arbitrary directories, so a relative cache means the model
+/// is looked up — and re-downloaded, or found half-downloaded and broken — per
+/// CWD. (A partial cache there fails with "Failed to retrieve onnx/model.onnx"
+/// and takes down the watch thread.) Pin it to one fixed path so the model
+/// loads no matter where the binary runs. Override with `CODEGRAPH_CACHE_DIR`.
+fn model_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CODEGRAPH_CACHE_DIR") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(".cache").join("codegraph").join("fastembed")
+}
 
 /// Embedding dimensionality of the default model. Must match the `FLOAT[384]`
 /// column in the store schema (`store::LadybugStore::init_schema`).
@@ -24,8 +44,12 @@ pub struct Embedder {
 impl Embedder {
     /// Load the embedding model (downloads on first use, then cached/offline).
     pub fn new() -> anyhow::Result<Self> {
+        let cache = model_cache_dir();
+        let _ = std::fs::create_dir_all(&cache);
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(true),
+            InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_cache_dir(cache)
+                .with_show_download_progress(true),
         )
         .map_err(|e| anyhow::anyhow!("load embedding model: {e}"))?;
         Ok(Self { model })

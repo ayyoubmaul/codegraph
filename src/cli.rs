@@ -48,6 +48,9 @@ pub enum Command {
         /// Number of results.
         #[arg(long, default_value_t = 8)]
         k: usize,
+        /// Restrict to one repo in the workspace (by name, e.g. my-repo).
+        #[arg(long)]
+        repo: Option<String>,
     },
 
     /// Show the direct callers of a symbol (uses a `--db` built by `index`).
@@ -57,6 +60,9 @@ pub enum Command {
         /// LadybugDB database path.
         #[arg(long)]
         db: PathBuf,
+        /// Restrict to callers in one repo (by name).
+        #[arg(long)]
+        repo: Option<String>,
     },
 
     /// Show the definitions transitively reachable from a symbol via calls.
@@ -69,6 +75,9 @@ pub enum Command {
         /// Max hops to traverse (1..=10).
         #[arg(long, default_value_t = 3)]
         depth: u8,
+        /// Restrict reachable defs to one repo (by name).
+        #[arg(long)]
+        repo: Option<String>,
     },
 
     /// Compute graph intelligence (PageRank importance + Louvain communities)
@@ -90,6 +99,9 @@ pub enum Command {
         /// Number of results.
         #[arg(long, default_value_t = 10)]
         k: usize,
+        /// Rank within one repo (by name) instead of the whole workspace.
+        #[arg(long)]
+        repo: Option<String>,
     },
 
     /// Show the largest code communities (modules) found by Louvain.

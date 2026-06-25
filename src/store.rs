@@ -86,29 +86,37 @@ impl LadybugStore {
     }
 
     /// Direct callers of any definition named `name`.
-    pub fn who_calls(&self, name: &str) -> anyhow::Result<Vec<DefHit>> {
+    pub fn who_calls(&self, name: &str, repo: Option<&str>) -> anyhow::Result<Vec<DefHit>> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
                 "MATCH (caller:Def)-[:Calls]->(callee:Def {name: $name}) \
+                 WHERE caller.file STARTS WITH $prefix \
                  RETURN DISTINCT caller.name, caller.file, caller.start_line \
                  ORDER BY caller.file, caller.start_line",
             )
             .map_err(|e| anyhow::anyhow!("lbug prepare who_calls: {e}"))?;
         let result = conn
-            .execute(&mut stmt, vec![("name", Value::String(name.to_string()))])
+            .execute(
+                &mut stmt,
+                vec![
+                    ("name", Value::String(name.to_string())),
+                    ("prefix", Value::String(repo_prefix(repo))),
+                ],
+            )
             .map_err(|e| anyhow::anyhow!("lbug who_calls: {e}"))?;
         Ok(result.filter_map(row_to_hit).collect())
     }
 
     /// Definitions transitively reachable from `name` via `Calls`, up to `depth`
     /// hops (clamped to 1..=10).
-    pub fn call_chain(&self, name: &str, depth: u8) -> anyhow::Result<Vec<DefHit>> {
+    pub fn call_chain(&self, name: &str, depth: u8, repo: Option<&str>) -> anyhow::Result<Vec<DefHit>> {
         let depth = depth.clamp(1, 10);
         let conn = self.read_conn()?;
         // `depth` is a validated integer, safe to interpolate; `name` is a param.
         let query = format!(
             "MATCH (:Def {{name: $name}})-[:Calls*1..{depth}]->(d:Def) \
+             WHERE d.file STARTS WITH $prefix \
              RETURN DISTINCT d.name, d.file, d.start_line \
              ORDER BY d.file, d.start_line"
         );
@@ -116,7 +124,13 @@ impl LadybugStore {
             .prepare(&query)
             .map_err(|e| anyhow::anyhow!("lbug prepare call_chain: {e}"))?;
         let result = conn
-            .execute(&mut stmt, vec![("name", Value::String(name.to_string()))])
+            .execute(
+                &mut stmt,
+                vec![
+                    ("name", Value::String(name.to_string())),
+                    ("prefix", Value::String(repo_prefix(repo))),
+                ],
+            )
             .map_err(|e| anyhow::anyhow!("lbug call_chain: {e}"))?;
         Ok(result.filter_map(row_to_hit).collect())
     }
@@ -148,23 +162,33 @@ impl LadybugStore {
 
     /// Brute-force cosine KNN over stored embeddings: the `k` definitions most
     /// similar to `query`, each with its similarity score.
-    pub fn semantic_search(&self, query: &[f32], k: usize) -> anyhow::Result<Vec<(DefHit, f32)>> {
+    pub fn semantic_search(
+        &self,
+        query: &[f32],
+        k: usize,
+        repo: Option<&str>,
+    ) -> anyhow::Result<Vec<(DefHit, f32)>> {
         let k = k.clamp(1, 100);
         let conn = self.read_conn()?;
         let q = Value::Array(
             LogicalType::Float,
             query.iter().map(|f| Value::Float(*f)).collect(),
         );
+        // With a repo prefix this scans only that repo's embedded defs, so the
+        // brute-force cosine stays cheap even on a big multi-repo workspace.
         let mut stmt = conn
             .prepare(&format!(
-                "MATCH (d:Def) WHERE d.embedding IS NOT NULL \
+                "MATCH (d:Def) WHERE d.embedding IS NOT NULL AND d.file STARTS WITH $prefix \
                  RETURN d.name, d.file, d.start_line, \
                  array_cosine_similarity(d.embedding, $q) AS sim \
                  ORDER BY sim DESC LIMIT {k}"
             ))
             .map_err(|e| anyhow::anyhow!("lbug prepare semantic_search: {e}"))?;
         let result = conn
-            .execute(&mut stmt, vec![("q", q)])
+            .execute(
+                &mut stmt,
+                vec![("q", q), ("prefix", Value::String(repo_prefix(repo)))],
+            )
             .map_err(|e| anyhow::anyhow!("lbug semantic_search: {e}"))?;
         Ok(result.filter_map(row_to_hit_score).collect())
     }
@@ -231,23 +255,24 @@ impl LadybugStore {
     }
 
     /// The `k` most important definitions by PageRank (with their score).
-    pub fn top_important(&self, k: usize) -> anyhow::Result<Vec<(DefHit, f32)>> {
+    pub fn top_important(
+        &self,
+        k: usize,
+        repo: Option<&str>,
+    ) -> anyhow::Result<Vec<(DefHit, f32)>> {
         let k = k.clamp(1, 200);
         let conn = self.read_conn()?;
-        let mut result = conn
-            .query(&format!(
-                "MATCH (d:Def) WHERE d.pagerank IS NOT NULL \
+        let mut stmt = conn
+            .prepare(&format!(
+                "MATCH (d:Def) WHERE d.pagerank IS NOT NULL AND d.file STARTS WITH $prefix \
                  RETURN d.name, d.file, d.start_line, d.pagerank \
                  ORDER BY d.pagerank DESC LIMIT {k}"
             ))
+            .map_err(|e| anyhow::anyhow!("lbug prepare top_important: {e}"))?;
+        let result = conn
+            .execute(&mut stmt, vec![("prefix", Value::String(repo_prefix(repo)))])
             .map_err(|e| anyhow::anyhow!("lbug top_important: {e}"))?;
-        let mut out = Vec::new();
-        while let Some(row) = result.next() {
-            if let Some(hit) = row_to_hit_score(row) {
-                out.push(hit);
-            }
-        }
-        Ok(out)
+        Ok(result.filter_map(row_to_hit_score).collect())
     }
 
     /// Every analyzed definition as `(community, def, pagerank)`, ordered by
@@ -669,6 +694,24 @@ fn as_string(v: Value) -> Option<String> {
     }
 }
 
+/// Path prefix for a repo-scoped query. `None` → `""` (every string starts with
+/// the empty string, so the filter matches all defs). `Some(repo)` → `"repo/"`;
+/// the trailing slash keeps `api` from also matching `api-client`. Works
+/// for sub-paths too (`Some("my-repo/dags")` → `"my-repo/dags/"`).
+fn repo_prefix(repo: Option<&str>) -> String {
+    match repo {
+        None => String::new(),
+        Some(r) => {
+            let r = r.trim_matches('/');
+            if r.is_empty() {
+                String::new()
+            } else {
+                format!("{r}/")
+            }
+        }
+    }
+}
+
 fn row_to_hit_score(row: Vec<Value>) -> Option<(DefHit, f32)> {
     let mut it = row.into_iter();
     let name = match it.next()? {
@@ -782,7 +825,7 @@ mod tests {
         let mut total_reads = 0usize;
         while !done.load(Ordering::SeqCst) {
             let t = Instant::now();
-            let callers = store.who_calls("fn0").expect("who_calls");
+            let callers = store.who_calls("fn0", None).expect("who_calls");
             let count = store.def_count().expect("def_count");
             let dt = t.elapsed();
             max_latency = max_latency.max(dt);
@@ -794,7 +837,7 @@ mod tests {
         writer.join().expect("writer thread");
         // A few more reads after the writer is done, for good measure.
         for _ in 0..5 {
-            assert_eq!(store.who_calls("fn0").expect("who_calls").len(), n - 1);
+            assert_eq!(store.who_calls("fn0", None).expect("who_calls").len(), n - 1);
             total_reads += 1;
         }
 

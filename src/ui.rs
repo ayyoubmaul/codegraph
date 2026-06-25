@@ -115,6 +115,9 @@ struct SearchParams {
     q: String,
     #[serde(default)]
     k: Option<usize>,
+    /// Optional repo name to scope the search to one repo in the workspace.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 async fn search(
@@ -130,7 +133,13 @@ async fn search(
     };
     let hits = {
         let vindex = state.vindex.read().await;
-        crate::vector::hybrid_search(&state.store, vindex.as_ref(), &query_vec, p.k.unwrap_or(15))?
+        crate::vector::hybrid_search(
+            &state.store,
+            vindex.as_ref(),
+            &query_vec,
+            p.k.unwrap_or(15),
+            p.repo.as_deref(),
+        )?
     };
     let hits: Vec<_> = hits
         .iter()
