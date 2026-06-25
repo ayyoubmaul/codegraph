@@ -50,7 +50,7 @@ struct SearchArgs {
 struct NameArgs {
     /// The exact symbol name (function/method/type).
     name: String,
-    /// Optional: restrict to callers in one repo (by name, e.g. "api").
+    /// Optional: restrict to callers in one repo (by name, e.g. "my-repo").
     #[serde(default)]
     repo: Option<String>,
 }

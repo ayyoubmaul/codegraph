@@ -770,7 +770,7 @@ fn as_string(v: Value) -> Option<String> {
 /// Path prefix for a repo-scoped query. `None` → `""` (every string starts with
 /// the empty string, so the filter matches all defs). `Some(repo)` → `"repo/"`;
 /// the trailing slash keeps `api` from also matching `api-client`. Works
-/// for sub-paths too (`Some("my-repo/dags")` → `"my-repo/dags/"`).
+/// for sub-paths too (`Some("my-repo/pkg")` → `"my-repo/pkg/"`).
 fn repo_prefix(repo: Option<&str>) -> String {
     match repo {
         None => String::new(),

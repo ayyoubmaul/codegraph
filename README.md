@@ -317,7 +317,7 @@ Built as vertical slices — each one builds and runs. ✅ = shipped.
       repo). **Python import resolution** maps dotted modules (`a.b.c`, relative
       `.`/`..`) to files, so Python finally gets real cross-file call edges and
       an imported-file resolution tier (verified: 0 → 175 import edges on a real
-      Api repo). New **`outline`** tool/command lists a repo's
+      Python repo). New **`outline`** tool/command lists a repo's
       classes/functions by file, so an agent maps a repo's shape in one call
       instead of reading every directory. Plus: the embedding model loads from
       an absolute cache (`$HOME/.cache/codegraph/fastembed`), CWD-independent.
