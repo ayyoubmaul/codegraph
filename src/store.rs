@@ -38,6 +38,15 @@ pub struct DefHit {
     pub start_line: i64,
 }
 
+/// One definition in a structural outline (`file`-ordered).
+#[derive(Debug, Clone)]
+pub struct OutlineRow {
+    pub file: String,
+    pub kind: String,
+    pub name: String,
+    pub start_line: i64,
+}
+
 /// A definition node with metadata, for the UI graph.
 #[derive(serde::Serialize)]
 pub struct GraphNode {
@@ -273,6 +282,43 @@ impl LadybugStore {
             .execute(&mut stmt, vec![("prefix", Value::String(repo_prefix(repo)))])
             .map_err(|e| anyhow::anyhow!("lbug top_important: {e}"))?;
         Ok(result.filter_map(row_to_hit_score).collect())
+    }
+
+    /// A structural outline: every definition (class/function/…) in scope,
+    /// ordered by file then line, capped at `limit`. Optionally scoped to one
+    /// repo. Lets an agent see a repo's shape in one call instead of reading
+    /// every directory.
+    pub fn outline(&self, repo: Option<&str>, limit: usize) -> anyhow::Result<Vec<OutlineRow>> {
+        let limit = limit.clamp(1, 5000);
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "MATCH (d:Def) WHERE d.file STARTS WITH $prefix \
+                 RETURN d.file, d.kind, d.name, d.start_line \
+                 ORDER BY d.file, d.start_line LIMIT {limit}"
+            ))
+            .map_err(|e| anyhow::anyhow!("lbug prepare outline: {e}"))?;
+        let result = conn
+            .execute(&mut stmt, vec![("prefix", Value::String(repo_prefix(repo)))])
+            .map_err(|e| anyhow::anyhow!("lbug outline: {e}"))?;
+        Ok(result
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                let file = as_string(it.next()?)?;
+                let kind = as_string(it.next()?)?;
+                let name = as_string(it.next()?)?;
+                let start_line = match it.next()? {
+                    Value::Int64(n) => n,
+                    _ => 0,
+                };
+                Some(OutlineRow {
+                    file,
+                    kind,
+                    name,
+                    start_line,
+                })
+            })
+            .collect())
     }
 
     /// Every analyzed definition as `(community, def, pagerank)`, ordered by

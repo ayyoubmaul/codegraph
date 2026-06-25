@@ -156,7 +156,12 @@ impl GraphBatch {
         let mut imports_by_file: HashMap<&str, HashSet<String>> = HashMap::new();
         let mut import_seen: HashSet<(String, String)> = HashSet::new();
         for imp in imports {
-            let Some(target) = resolve_relative_import(&imp.file, &imp.source, &file_set) else {
+            let resolved = if is_python_file(&imp.file) {
+                resolve_python_import(&imp.file, &imp.source, &file_set)
+            } else {
+                resolve_relative_import(&imp.file, &imp.source, &file_set)
+            };
+            let Some(target) = resolved else {
                 continue;
             };
             if target == imp.file {
@@ -271,6 +276,74 @@ impl GraphBatch {
 
         batch
     }
+}
+
+fn is_python_file(file: &str) -> bool {
+    file.ends_with(".py") || file.ends_with(".pyi")
+}
+
+/// Resolve a Python `import`/`from … import` target (a dotted module path, with
+/// leading dots for relative imports) to a file in the workspace.
+///
+/// Absolute imports (`include.pipelines.factory`) are rooted at the repo root
+/// (the importing file's first path segment) — or a conventional `src/` under
+/// it. Relative imports (`.sibling`, `..pkg.mod`) walk up from the importing
+/// file's package: one leading dot = the current package, each extra dot = one
+/// level up. Probes both `…/<mod>.py` and the package `…/<mod>/__init__.py`.
+fn resolve_python_import(
+    importing_file: &str,
+    source: &str,
+    files: &HashSet<&str>,
+) -> Option<String> {
+    let repo = importing_file.split('/').next().unwrap_or("");
+    let dir = importing_file
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("");
+
+    let dots = source.chars().take_while(|c| *c == '.').count();
+    let rest = &source[dots..];
+    let parts: Vec<&str> = if rest.is_empty() {
+        Vec::new()
+    } else {
+        rest.split('.').collect()
+    };
+
+    // Directories the dotted path is rooted at.
+    let bases: Vec<String> = if dots > 0 {
+        // Relative: up `dots - 1` levels from the importing file's package.
+        let mut segs: Vec<&str> = if dir.is_empty() {
+            Vec::new()
+        } else {
+            dir.split('/').collect()
+        };
+        for _ in 0..dots.saturating_sub(1) {
+            segs.pop()?; // None → climbed above the repo root
+        }
+        vec![segs.join("/")]
+    } else {
+        // Absolute: repo root, or a conventional `src/` layout under it.
+        vec![repo.to_string(), format!("{repo}/src")]
+    };
+
+    for base in bases {
+        let mut path = base;
+        for p in &parts {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(p);
+        }
+        let cand_py = format!("{path}.py");
+        if files.contains(cand_py.as_str()) {
+            return Some(cand_py);
+        }
+        let cand_init = format!("{path}/__init__.py");
+        if files.contains(cand_init.as_str()) {
+            return Some(cand_init);
+        }
+    }
+    None
 }
 
 /// Resolve a relative import (`./x`, `../lib/x`) against the importing file's

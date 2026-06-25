@@ -173,6 +173,21 @@ impl Lang {
         }
     }
 
+    /// Module-path candidates to resolve for one import statement.
+    ///
+    /// Most languages yield a single specifier. Python `from a.b import c, d`
+    /// yields one candidate per imported name (`a.b.c`, `a.b.d` — to catch
+    /// submodule imports) *plus* the module itself (`a.b` — when the names are
+    /// just attributes). Resolution in `graph::GraphBatch::build` tries each and
+    /// keeps the ones that hit a real file, so call resolution can scope to the
+    /// imported file.
+    pub fn import_sources(self, node: Node, source: &[u8]) -> Vec<String> {
+        match self {
+            Lang::Python => python_import_sources(node, source),
+            _ => self.import_source(node, source).into_iter().collect(),
+        }
+    }
+
     /// Extract the raw import source (module path / specifier), quotes stripped.
     /// Resolution to a file happens in `graph::GraphBatch::build`.
     pub fn import_source(self, node: Node, source: &[u8]) -> Option<String> {
@@ -247,6 +262,59 @@ impl Lang {
         collect_decls(fn_node, source, &mut out);
         out
     }
+}
+
+/// Python import targets as dotted module paths (leading dots kept for relative
+/// imports). `import a.b, c as x` → `["a.b", "c"]`. `from a.b import d, e` →
+/// `["a.b.d", "a.b.e", "a.b"]`. `from . import m` → `[".m", "."]`.
+fn python_import_sources(node: Node, source: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    match node.kind() {
+        "import_statement" => {
+            let mut cur = node.walk();
+            for ch in node.named_children(&mut cur) {
+                let dotted = match ch.kind() {
+                    "dotted_name" | "identifier" => Some(ch),
+                    "aliased_import" => ch.child_by_field_name("name"),
+                    _ => None,
+                };
+                if let Some(t) = dotted.and_then(|d| d.utf8_text(source).ok()) {
+                    out.push(t.to_string());
+                }
+            }
+        }
+        "import_from_statement" => {
+            let module = node
+                .child_by_field_name("module_name")
+                .and_then(|m| m.utf8_text(source).ok())
+                .unwrap_or("")
+                .to_string();
+            // Imported names (each `name` field); skip wildcard `*`.
+            let mut cur = node.walk();
+            for ch in node.children_by_field_name("name", &mut cur) {
+                let n = match ch.kind() {
+                    "aliased_import" => ch.child_by_field_name("name"),
+                    _ => Some(ch),
+                };
+                let Some(name) = n.and_then(|n| n.utf8_text(source).ok()) else {
+                    continue;
+                };
+                // Join module + name; a relative module already ends in a dot.
+                if module.is_empty() {
+                    out.push(name.to_string());
+                } else if module.ends_with('.') {
+                    out.push(format!("{module}{name}"));
+                } else {
+                    out.push(format!("{module}.{name}"));
+                }
+            }
+            if !module.is_empty() {
+                out.push(module);
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// First `type_identifier` (or `identifier`) under `node` — the base type name,

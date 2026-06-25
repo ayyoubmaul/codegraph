@@ -130,7 +130,7 @@ fn collect(
             }
         }
     } else if lang.is_import_node(node.kind()) {
-        if let Some(src) = lang.import_source(node, source) {
+        for src in lang.import_sources(node, source) {
             out.imports.push(ImportRef {
                 file: rel_path.to_string(),
                 source: src,

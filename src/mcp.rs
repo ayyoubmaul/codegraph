@@ -14,7 +14,7 @@ use rmcp::{
 use tokio::sync::Mutex;
 
 use crate::embed::Embedder;
-use crate::store::{DefHit, LadybugStore};
+use crate::store::{DefHit, LadybugStore, OutlineRow};
 
 #[derive(Clone)]
 pub struct CodegraphServer {
@@ -73,6 +73,16 @@ struct TopKArgs {
     /// "my-repo") instead of across the whole workspace.
     #[serde(default)]
     repo: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct OutlineArgs {
+    /// Optional: outline just one repo in the workspace (by name).
+    #[serde(default)]
+    repo: Option<String>,
+    /// Max definitions to list (default 300).
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[tool_router]
@@ -194,6 +204,27 @@ impl CodegraphServer {
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
+
+    #[tool(
+        description = "Structural outline: every class/function grouped by file, in file order. Use this to map a repo's shape in one call instead of reading files one by one. Pass `repo` to scope to one repo, and `limit` to cap the count."
+    )]
+    async fn outline(
+        &self,
+        Parameters(args): Parameters<OutlineArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = args.limit.unwrap_or(300);
+        let rows = self
+            .store
+            .outline(args.repo.as_deref(), limit)
+            .map_err(internal)?;
+        let mut out = format_outline(&rows);
+        if rows.len() >= limit {
+            out.push_str(&format!(
+                "\n… truncated at {limit} defs — narrow with `repo` or raise `limit`.\n"
+            ));
+        }
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
 }
 
 #[tool_handler]
@@ -203,10 +234,11 @@ impl ServerHandler for CodegraphServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(
-            "codegraph: a structural + semantic code graph. Tools: search (find code by \
-             meaning), who_calls, call_chain, important (PageRank). In a multi-repo \
-             workspace, pass the optional `repo` arg (a repo name, e.g. \
-             'my-repo') to scope any tool to a single repo."
+            "codegraph: a structural + semantic code graph. Tools: outline (map a \
+             repo's classes/functions by file — use this before reading files), \
+             search (find code by meaning), who_calls, call_chain, important \
+             (PageRank). In a multi-repo workspace, pass the optional `repo` arg (a \
+             repo name, e.g. 'my-repo') to scope any tool to a single repo."
                 .into(),
         );
         info
@@ -215,6 +247,35 @@ impl ServerHandler for CodegraphServer {
 
 fn internal(e: anyhow::Error) -> McpError {
     McpError::internal_error(e.to_string(), None)
+}
+
+/// Group outline rows (already file-ordered) into a per-file structural map.
+fn format_outline(rows: &[OutlineRow]) -> String {
+    if rows.is_empty() {
+        return "no definitions in scope (is the database indexed?)".into();
+    }
+    let mut out = String::new();
+    let mut files = 0;
+    let mut i = 0;
+    while i < rows.len() {
+        let file = &rows[i].file;
+        let start = i;
+        while i < rows.len() && &rows[i].file == file {
+            i += 1;
+        }
+        let group = &rows[start..i];
+        out.push_str(&format!("\n{file}  ({} defs)\n", group.len()));
+        for r in group {
+            out.push_str(&format!(
+                "  {:<9} {}  :{}\n",
+                r.kind.to_lowercase(),
+                r.name,
+                r.start_line
+            ));
+        }
+        files += 1;
+    }
+    format!("{} definitions across {files} files:\n{out}", rows.len())
 }
 
 fn format_hits(hits: &[DefHit], name: &str, label: &str) -> String {

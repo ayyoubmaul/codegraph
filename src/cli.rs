@@ -104,6 +104,19 @@ pub enum Command {
         repo: Option<String>,
     },
 
+    /// Structural outline: classes/functions grouped by file (optionally one repo).
+    Outline {
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+        /// Restrict the outline to one repo (by name).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Max definitions to list.
+        #[arg(long, default_value_t = 300)]
+        limit: usize,
+    },
+
     /// Show the largest code communities (modules) found by Louvain.
     Communities {
         /// LadybugDB database path.

@@ -54,6 +54,7 @@ fn main() -> anyhow::Result<()> {
         } => call_chain(&name, &db, depth, repo.as_deref()),
         Command::Analyze { db, iters } => analyze_cmd(&db, iters),
         Command::Important { db, k, repo } => important(&db, k, repo.as_deref()),
+        Command::Outline { db, repo, limit } => outline(&db, repo.as_deref(), limit),
         Command::Communities { db, k } => communities(&db, k),
         Command::Watch { paths, db, embed } => watch::run(&paths, &db, embed),
         Command::Serve {
@@ -259,6 +260,36 @@ fn important(db: &Path, k: usize, repo: Option<&str>) -> anyhow::Result<()> {
         for (h, pr) in hits {
             println!("  {pr:.4}  {:<28} {}:{}", h.name, h.file, h.start_line);
         }
+    }
+    Ok(())
+}
+
+fn outline(db: &Path, repo: Option<&str>, limit: usize) -> anyhow::Result<()> {
+    let store = store::LadybugStore::open(db)?;
+    let rows = store.outline(repo, limit)?;
+    if rows.is_empty() {
+        println!("no definitions in scope (did you `index` first?)");
+        return Ok(());
+    }
+    // Rows arrive ordered by (file, start_line); group consecutively by file.
+    let mut i = 0;
+    let mut files = 0;
+    while i < rows.len() {
+        let file = &rows[i].file;
+        let start = i;
+        while i < rows.len() && &rows[i].file == file {
+            i += 1;
+        }
+        let group = &rows[start..i];
+        println!("\n{file}  ({} defs)", group.len());
+        for r in group {
+            println!("  {:<9} {:<28} :{}", r.kind.to_lowercase(), r.name, r.start_line);
+        }
+        files += 1;
+    }
+    println!("\n{} definitions across {files} files", rows.len());
+    if rows.len() >= limit {
+        println!("(truncated at {limit} — narrow with --repo or raise --limit)");
     }
     Ok(())
 }
