@@ -75,6 +75,17 @@ impl LadybugStore {
         Connection::new(&self.db).map_err(|e| anyhow::anyhow!("lbug connect: {e}"))
     }
 
+    /// Flush the write-ahead log into the main database file. Call this on a
+    /// graceful shutdown so a restart doesn't have to replay (or trip over) a
+    /// WAL left behind by an ungraceful kill.
+    pub fn checkpoint(&self) -> anyhow::Result<()> {
+        let _w = self.write_lock.lock().unwrap();
+        self.connect()?
+            .query("CHECKPOINT")
+            .map_err(|e| anyhow::anyhow!("lbug checkpoint: {e}"))?;
+        Ok(())
+    }
+
     /// A connection for an agent-facing read query, capped at [`READ_TIMEOUT_MS`]
     /// so a slow/pathological query returns an error rather than hanging.
     fn read_conn(&self) -> anyhow::Result<Connection<'_>> {

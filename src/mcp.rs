@@ -8,7 +8,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpService, session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router,
@@ -113,12 +113,15 @@ impl CodegraphServer {
 
     /// Build from an already-shared store + embedder + vector index, so a
     /// background watcher can patch the same state this server queries.
+    ///
+    /// Does *not* warm the embedder — callers do that once up front. (The HTTP
+    /// transport calls this per request in stateless mode, so warming here would
+    /// spawn a model-load thread on every call.)
     pub fn with_shared(
         store: Arc<LadybugStore>,
         embedder: Arc<Mutex<Option<Embedder>>>,
         vindex: crate::vector::SharedVector,
     ) -> Self {
-        crate::embed::warm(embedder.clone());
         Self {
             store,
             embedder,
@@ -385,6 +388,7 @@ pub async fn serve_watch(
     // big workspace) never blocks a query embed.
     let query_embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
     let watch_embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
+    crate::embed::warm(query_embedder.clone());
 
     // Index + watch on a background thread so the MCP server starts answering
     // immediately (no startup index → no handshake timeout). Tools return
@@ -438,8 +442,18 @@ pub async fn serve_http(
         });
     }
 
+    // Kept aside for a checkpoint on graceful shutdown (the factory moves `store`).
+    let ckpt_store = store.clone();
+
     // Each connecting client is one session; the factory hands it a server that
     // shares the same store/embedder/vindex Arcs — one process, one DB lock.
+    // Stateless JSON mode: each request is self-contained (no server-side
+    // session to lose). codegraph's tools are pure request→response, so this is
+    // both sufficient and robust — it avoids "Session not found" when a client
+    // doesn't carry the streamable-http session id across requests.
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true);
     let service = StreamableHttpService::new(
         move || {
             Ok(CodegraphServer::with_shared(
@@ -449,13 +463,46 @@ pub async fn serve_http(
             ))
         },
         Arc::new(LocalSessionManager::default()),
-        Default::default(),
+        config,
     );
     let app = axum::Router::new().nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))?;
     eprintln!("codegraph MCP (HTTP) → http://{addr}/mcp  (connect multiple clients here)");
-    axum::serve(listener, app).await?;
+    // Graceful shutdown on SIGINT/SIGTERM: stop accepting, finish in-flight
+    // requests, then checkpoint so a kill doesn't leave a WAL the next start
+    // would have to replay (or, if killed mid-write, choke on).
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    eprintln!("codegraph: shutting down — checkpointing database…");
+    if let Err(e) = ckpt_store.checkpoint() {
+        eprintln!("codegraph: checkpoint failed: {e}");
+    }
     Ok(())
+}
+
+/// Resolve when the process receives SIGINT (Ctrl-C) or SIGTERM (`launchctl
+/// unload`, `kill`), so the server can shut down cleanly instead of being killed
+/// mid-write.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
