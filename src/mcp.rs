@@ -209,6 +209,21 @@ impl CodegraphServer {
     }
 
     #[tool(
+        description = "List the repos indexed in this codegraph workspace, with definition counts. The index spans the whole workspace regardless of your current working directory — call this to check whether a repo is queryable BEFORE treating it as external (e.g. before fetching from GitHub or grepping)."
+    )]
+    async fn repos(&self) -> Result<CallToolResult, McpError> {
+        let rows = self.store.repos().map_err(internal)?;
+        let mut out = String::new();
+        for (repo, n) in &rows {
+            out.push_str(&format!("{repo}  ({n} defs)\n"));
+        }
+        if out.is_empty() {
+            out.push_str("no repos indexed yet (index a workspace with `index`)");
+        }
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
         description = "Structural outline: every class/function grouped by file, in file order. Use this to map a repo's shape in one call instead of reading files one by one. Pass `repo` to scope to one repo, and `limit` to cap the count."
     )]
     async fn outline(
@@ -239,7 +254,11 @@ impl ServerHandler for CodegraphServer {
         info.instructions = Some(
             "codegraph is a structural + semantic index of the indexed codebase(s). \
              Prefer it over reading or grepping files when exploring code:\n\
-             • Understand a repo's shape: call `outline` FIRST (it lists every \
+             • The index spans the WHOLE workspace of indexed repos, independent of \
+             your current working directory. A repo outside your cwd may still be \
+             indexed — do NOT assume it's 'external' and fetch it from GitHub/grep. \
+             Call `repos` to see exactly which repos are queryable.\n\
+             • Understand a repo's shape: call `outline` (it lists every \
              class/function per file in one call). Read individual files only after \
              it points you somewhere — don't walk the tree by hand.\n\
              • Find where something lives: use `search` (by meaning) instead of \
@@ -247,7 +266,7 @@ impl ServerHandler for CodegraphServer {
              • Trace relationships: `who_calls` and `call_chain`; `important` ranks \
              the most-depended-on code.\n\
              • Multi-repo workspace: pass the optional `repo` arg (a repo name, e.g. \
-             'my-repo') to scope any tool to one repo.\n\
+             'my-repo' or 'shared-lib') to scope any tool to one repo.\n\
              Scope note: only code definitions in Rust/Python/Go/TS-JS are indexed — \
              config/data/docs (.toml, .sql, .yaml, .md, …) are not, so read those \
              files directly."

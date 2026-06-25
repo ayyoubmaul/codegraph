@@ -8,6 +8,10 @@ answers in one call what otherwise takes many `Read`/`Glob`/grep steps.
 
 Recommended workflow:
 
+0. **The index spans the whole workspace, regardless of your working directory.**
+   A repo can be indexed even if it's outside the dir you opened — don't assume
+   it's "external" and fetch it from GitHub/grep. Call `repos` to list which
+   repos are queryable, then use the `repo` arg to target one.
 1. **Map the repo first — `outline`.** Before reading files, call `outline`
    (pass `repo` in a multi-repo workspace) to get every class/function grouped
    by file. Read individual files only after the outline points you somewhere.

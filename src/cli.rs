@@ -104,6 +104,13 @@ pub enum Command {
         repo: Option<String>,
     },
 
+    /// List the repos indexed in the database, with definition counts.
+    Repos {
+        /// LadybugDB database path.
+        #[arg(long)]
+        db: PathBuf,
+    },
+
     /// Structural outline: classes/functions grouped by file (optionally one repo).
     Outline {
         /// LadybugDB database path.

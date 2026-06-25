@@ -54,6 +54,7 @@ fn main() -> anyhow::Result<()> {
         } => call_chain(&name, &db, depth, repo.as_deref()),
         Command::Analyze { db, iters } => analyze_cmd(&db, iters),
         Command::Important { db, k, repo } => important(&db, k, repo.as_deref()),
+        Command::Repos { db } => repos(&db),
         Command::Outline { db, repo, limit } => outline(&db, repo.as_deref(), limit),
         Command::Communities { db, k } => communities(&db, k),
         Command::Watch { paths, db, embed } => watch::run(&paths, &db, embed),
@@ -268,6 +269,20 @@ fn important(db: &Path, k: usize, repo: Option<&str>) -> anyhow::Result<()> {
         for (h, pr) in hits {
             println!("  {pr:.4}  {:<28} {}:{}", h.name, h.file, h.start_line);
         }
+    }
+    Ok(())
+}
+
+fn repos(db: &Path) -> anyhow::Result<()> {
+    let store = store::LadybugStore::open(db)?;
+    let rows = store.repos()?;
+    if rows.is_empty() {
+        println!("no repos indexed yet");
+        return Ok(());
+    }
+    println!("{} repo(s) indexed:", rows.len());
+    for (repo, n) in rows {
+        println!("  {repo:<32} {n} defs");
     }
     Ok(())
 }

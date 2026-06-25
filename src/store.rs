@@ -284,6 +284,33 @@ impl LadybugStore {
         Ok(result.filter_map(row_to_hit_score).collect())
     }
 
+    /// The repos currently indexed (first path segment of each def's file),
+    /// each with its definition count, ordered by count desc. Lets an agent see
+    /// what's queryable — the index spans the whole workspace regardless of any
+    /// client's working directory.
+    pub fn repos(&self) -> anyhow::Result<Vec<(String, u64)>> {
+        let conn = self.connect()?;
+        let result = conn
+            .query("MATCH (d:Def) RETURN d.file, count(*)")
+            .map_err(|e| anyhow::anyhow!("lbug repos: {e}"))?;
+        let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for row in result {
+            let mut it = row.into_iter();
+            let Some(Value::String(file)) = it.next() else {
+                continue;
+            };
+            let c = match it.next() {
+                Some(Value::Int64(n)) => n.max(0) as u64,
+                _ => 0,
+            };
+            let repo = file.split('/').next().unwrap_or("").to_string();
+            *counts.entry(repo).or_default() += c;
+        }
+        let mut out: Vec<(String, u64)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
     /// A structural outline: every definition (class/function/…) in scope,
     /// ordered by file then line, capped at `limit`. Optionally scoped to one
     /// repo. Lets an agent see a repo's shape in one call instead of reading

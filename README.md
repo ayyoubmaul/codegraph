@@ -114,6 +114,7 @@ and your agent gets the same answers.
 | `call-chain <name> --db <db> [--depth N] [--repo <name>]` | Everything transitively reachable from a symbol via calls. |
 | `analyze --db <db>` | Compute + store PageRank importance and Louvain communities. |
 | `important --db <db> [--k N] [--repo <name>]` | Most-depended-on definitions (by PageRank); `--repo` ranks within one repo. |
+| `repos --db <db>` | List the repos indexed in the workspace, with def counts. |
 | `outline --db <db> [--repo <name>] [--limit N]` | Structural map: classes/functions grouped by file (scope with `--repo`). |
 | `communities --db <db> [--k N]` | Largest code clusters (modules) found by Louvain. |
 | `watch <repo…> --db <db> [--embed]` | Keep the graph fresh as you edit — incremental, no full reindex. |
@@ -130,8 +131,9 @@ Point any MCP client at `codegraph serve`. For **Claude Code**:
 claude mcp add codegraph -- /abs/path/to/codegraph serve --db /abs/path/to/graph.db
 ```
 
-Tools exposed: `outline` (map a repo's classes/functions by file — call this
-before reading files), `search` (by meaning), `who_calls`, `call_chain`,
+Tools exposed: `repos` (list indexed repos — the index is workspace-wide, not
+limited to your cwd), `outline` (map a repo's classes/functions by file — call
+this before reading files), `search` (by meaning), `who_calls`, `call_chain`,
 `important`.
 
 **Scope to one repo.** In a multi-repo workspace, every tool takes an optional
