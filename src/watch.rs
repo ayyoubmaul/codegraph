@@ -1,13 +1,10 @@
-//! Incremental indexing: watch the repo and patch the graph per changed file.
+//! Incremental indexing: watch repos and patch the graph per changed file.
 //!
-//! Used by the standalone `watch` command and by `serve --watch` / `ui --watch`,
-//! where the *same* shared store is also served. The store is held behind a
-//! `tokio::sync::Mutex` so async handlers can `.lock().await` it while this
-//! watcher thread `blocking_lock()`s it from a plain OS thread.
-//!
-//! Per change: re-parse only the changed file, rebuild resolution over the full
-//! symbol set in memory, then rewrite just the sub-graph incident to that file
-//! (its nodes + every edge touching them, incoming and outgoing).
+//! Supports a multi-repo workspace — each watched root is qualified by its repo
+//! name, and filesystem events are mapped back to the right repo prefix. On
+//! create/modify, only the changed file is re-parsed and its incident sub-graph
+//! rewritten (re-resolved against the full in-memory cache); on delete, the
+//! file's nodes/edges are removed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,85 +25,52 @@ use crate::walk;
 pub type Cache = HashMap<String, ParseResult>;
 pub type SharedStore = Arc<Mutex<LadybugStore>>;
 pub type SharedEmbedder = Arc<Mutex<Option<Embedder>>>;
+/// `(canonical root, repo prefix)` for each watched repo.
+type Roots = Vec<(PathBuf, String)>;
 
-/// Standalone `watch` command: own the store, index once, then watch forever.
-pub fn run(root: &Path, db: &Path, embed_on: bool) -> anyhow::Result<()> {
+/// Standalone `watch` command: own the store, index all roots, watch forever.
+pub fn run(paths: &[PathBuf], db: &Path, embed_on: bool) -> anyhow::Result<()> {
+    let (roots, cache) = prepare(paths)?;
     let mut store = LadybugStore::open(db)?;
     let mut embedder: Option<Embedder> = None;
-    let (root, cache, repo) = index_once_owned(root, &mut store, &mut embedder, embed_on)?;
-    let store: SharedStore = Arc::new(Mutex::new(store));
-    let embedder: SharedEmbedder = Arc::new(Mutex::new(embedder));
-    // Standalone watch serves nothing, so there's no in-memory vector index.
-    watch_only(root, cache, store, embedder, embed_on, None, repo)
-}
-
-/// Full index over an owned store (no locking) — used at startup before the
-/// store is shared. Returns the canonical root and the per-file parse cache.
-pub fn index_once_owned(
-    root: &Path,
-    store: &mut LadybugStore,
-    embedder: &mut Option<Embedder>,
-    embed_on: bool,
-) -> anyhow::Result<(PathBuf, Cache, String)> {
-    let repo = walk::repo_name(root);
-    let root = root.canonicalize()?;
-    let mut cache: Cache = HashMap::new();
-    for sf in walk::collect_files(&root, &repo) {
-        if let Ok(src) = std::fs::read(&sf.path) {
-            if let Ok(pr) = parse::parse_file(&sf.rel, &src, sf.lang) {
-                cache.insert(sf.rel.clone(), pr);
-            }
-        }
-    }
     let batch = build_full(&cache);
-    store.write_batch(&batch)?;
+    if store.def_count()? == 0 {
+        bulk_or_tmp(&mut store, &batch)?;
+    } else {
+        store.write_batch(&batch)?;
+    }
     if embed_on {
         if embedder.is_none() {
-            *embedder = Some(Embedder::new()?);
+            embedder = Some(Embedder::new()?);
         }
         let already = store.embedded_ids()?;
         let items = embed::embed_defs(embedder.as_mut().unwrap(), &batch, &already)?;
         store.set_embeddings(&items)?;
     }
-    eprintln!("codegraph: indexed {} files", cache.len());
-    Ok((root, cache, repo))
+    let store: SharedStore = Arc::new(Mutex::new(store));
+    let embedder: SharedEmbedder = Arc::new(Mutex::new(embedder));
+    watch_only(roots, cache, store, embedder, embed_on, None)
 }
 
-/// Full index into an *already-shared* store, then watch — all on a background
-/// thread so the server can start serving immediately (no startup blocking, no
-/// MCP handshake timeout). Uses `blocking_lock`, so must run off the async
-/// runtime (a dedicated `std::thread`).
+/// Index all roots into an *already-shared* store, then watch — on a background
+/// thread so a server can serve immediately.
 pub fn index_and_watch(
-    root: &Path,
+    paths: &[PathBuf],
     store: SharedStore,
     embedder: SharedEmbedder,
     vindex: SharedVector,
     embed_on: bool,
 ) -> anyhow::Result<()> {
-    let repo = walk::repo_name(root);
-    let root = root.canonicalize()?;
-
-    let mut cache: Cache = HashMap::new();
-    for sf in walk::collect_files(&root, &repo) {
-        if let Ok(src) = std::fs::read(&sf.path) {
-            if let Ok(pr) = parse::parse_file(&sf.rel, &src, sf.lang) {
-                cache.insert(sf.rel.clone(), pr);
-            }
-        }
-    }
+    let (roots, cache) = prepare(paths)?;
     let batch = build_full(&cache);
-
     {
         let mut s = store.blocking_lock();
         if s.def_count()? == 0 {
-            let tmp = std::env::temp_dir().join(format!("codegraph-bulk-{}", std::process::id()));
-            s.bulk_load(&batch, &tmp)?;
-            let _ = std::fs::remove_dir_all(&tmp);
+            bulk_or_tmp(&mut s, &batch)?;
         } else {
             s.write_batch(&batch)?;
         }
     }
-
     if embed_on {
         let already = store.blocking_lock().embedded_ids()?;
         let items = {
@@ -120,7 +84,6 @@ pub fn index_and_watch(
             store.blocking_lock().set_embeddings(&items)?;
         }
     }
-
     {
         let built = {
             let s = store.blocking_lock();
@@ -128,29 +91,32 @@ pub fn index_and_watch(
         };
         *vindex.blocking_lock() = built;
     }
-
-    eprintln!("codegraph: initial index complete ({} files)", cache.len());
-    watch_only(root, cache, store, embedder, embed_on, Some(vindex), repo)
+    eprintln!(
+        "codegraph: indexed {} files across {} repo(s)",
+        cache.len(),
+        roots.len()
+    );
+    watch_only(roots, cache, store, embedder, embed_on, Some(vindex))
 }
 
-/// Watch `root` and patch the shared store on each change. Runs on a plain OS
-/// thread (uses `blocking_lock`), so it must NOT be called inside the async
-/// runtime.
+/// Watch every root and patch the shared store on each change. Runs on a plain
+/// OS thread (uses `blocking_lock`), not inside the async runtime.
 pub fn watch_only(
-    root: PathBuf,
+    roots: Roots,
     mut cache: Cache,
     store: SharedStore,
     embedder: SharedEmbedder,
     embed_on: bool,
     vindex: Option<SharedVector>,
-    repo: String,
 ) -> anyhow::Result<()> {
-    eprintln!("codegraph: watching {}", root.display());
     let (tx, rx) = channel();
     let mut watcher = notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
     })?;
-    watcher.watch(&root, RecursiveMode::Recursive)?;
+    for (root, _) in &roots {
+        watcher.watch(root, RecursiveMode::Recursive)?;
+    }
+    eprintln!("codegraph: watching {} repo(s)", roots.len());
 
     for res in rx {
         let event = match res {
@@ -163,10 +129,9 @@ pub fn watch_only(
                     let Some(lang) = Lang::from_path(path) else {
                         continue;
                     };
-                    let Ok(stripped) = path.strip_prefix(&root) else {
+                    let Some(rel) = rel_for(&roots, path) else {
                         continue;
                     };
-                    let rel = format!("{repo}/{}", stripped.to_string_lossy().replace('\\', "/"));
                     if !path.exists() {
                         remove(&store, &mut cache, &rel);
                         continue;
@@ -190,16 +155,53 @@ pub fn watch_only(
                     if Lang::from_path(path).is_none() {
                         continue;
                     }
-                    let Ok(stripped) = path.strip_prefix(&root) else {
+                    let Some(rel) = rel_for(&roots, path) else {
                         continue;
                     };
-                    let rel = format!("{repo}/{}", stripped.to_string_lossy().replace('\\', "/"));
                     remove(&store, &mut cache, &rel);
                 }
             }
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// Parse every root into a cache; return the canonical roots + their repo names.
+fn prepare(paths: &[PathBuf]) -> anyhow::Result<(Roots, Cache)> {
+    let mut roots = Roots::new();
+    let mut cache = Cache::new();
+    for path in paths {
+        let repo = walk::repo_name(path);
+        let root = path.canonicalize()?;
+        for sf in walk::collect_files(&root, &repo) {
+            if let Ok(src) = std::fs::read(&sf.path) {
+                if let Ok(pr) = parse::parse_file(&sf.rel, &src, sf.lang) {
+                    cache.insert(sf.rel.clone(), pr);
+                }
+            }
+        }
+        roots.push((root, repo));
+    }
+    Ok((roots, cache))
+}
+
+/// Map an absolute event path to its qualified `repo/rel`, or `None` if it isn't
+/// under any watched root.
+fn rel_for(roots: &Roots, path: &Path) -> Option<String> {
+    for (root, repo) in roots {
+        if let Ok(stripped) = path.strip_prefix(root) {
+            let s = stripped.to_string_lossy().replace('\\', "/");
+            return Some(format!("{repo}/{s}"));
+        }
+    }
+    None
+}
+
+fn bulk_or_tmp(store: &mut LadybugStore, batch: &GraphBatch) -> anyhow::Result<()> {
+    let tmp = std::env::temp_dir().join(format!("codegraph-bulk-{}", std::process::id()));
+    store.bulk_load(batch, &tmp)?;
+    let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }
 
@@ -212,6 +214,7 @@ fn remove(store: &SharedStore, cache: &mut Cache, rel: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_file(
     store: &SharedStore,
     embedder: &SharedEmbedder,
@@ -244,8 +247,6 @@ fn update_file(
         s.write_batch(&sub)?;
     }
     if embed_on {
-        // The changed file's defs were just removed, so they have no cached
-        // embedding — embed them all.
         let skip = std::collections::HashSet::new();
         let items = {
             let mut guard = embedder.blocking_lock();
@@ -285,8 +286,7 @@ fn build_full(cache: &Cache) -> GraphBatch {
 }
 
 /// Nodes/edges incident to `rel`: its File node, its Def nodes, and every edge
-/// touching them (incoming + outgoing). Endpoint nodes in other files already
-/// exist in the DB, so the MATCH-based edge writes still resolve.
+/// touching them (incoming + outgoing).
 fn sub_batch_for_file(batch: &GraphBatch, rel: &str) -> GraphBatch {
     let def_prefix = format!("{rel}#");
     let touches = |id: &str| id == rel || id.starts_with(&def_prefix);

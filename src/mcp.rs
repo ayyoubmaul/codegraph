@@ -1,7 +1,7 @@
 //! MCP server exposing codegraph's structural + semantic queries over stdio,
 //! so AI agents (Claude Code, Codex, …) can query the code graph directly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -216,7 +216,7 @@ pub async fn serve(db: &Path) -> anyhow::Result<()> {
 
 /// Serve over stdio while a background thread watches `repo` and keeps the
 /// shared store fresh. The initial index completes before serving begins.
-pub async fn serve_watch(db: &Path, repo: &Path, embed: bool) -> anyhow::Result<()> {
+pub async fn serve_watch(db: &Path, repos: &[PathBuf], embed: bool) -> anyhow::Result<()> {
     let store: Arc<Mutex<LadybugStore>> = Arc::new(Mutex::new(LadybugStore::open(db)?));
     let embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
     let vindex: crate::vector::SharedVector = Arc::new(Mutex::new(None));
@@ -224,14 +224,14 @@ pub async fn serve_watch(db: &Path, repo: &Path, embed: bool) -> anyhow::Result<
     // Index + watch on a background thread so the MCP server starts answering
     // immediately (no startup index → no handshake timeout). Tools return
     // partial results until the initial index completes, then full + live.
-    let (s2, e2, v2, repo) = (
+    let (s2, e2, v2, repos) = (
         store.clone(),
         embedder.clone(),
         vindex.clone(),
-        repo.to_path_buf(),
+        repos.to_vec(),
     );
     std::thread::spawn(move || {
-        if let Err(e) = crate::watch::index_and_watch(&repo, s2, e2, v2, embed) {
+        if let Err(e) = crate::watch::index_and_watch(&repos, s2, e2, v2, embed) {
             eprintln!("codegraph: index/watch stopped: {e}");
         }
     });

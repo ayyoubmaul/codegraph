@@ -102,11 +102,11 @@ pub enum Command {
         k: usize,
     },
 
-    /// Watch a repository and incrementally patch the graph as files change.
+    /// Watch one or more repositories and incrementally patch the graph.
     Watch {
-        /// Path to the repository root.
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        /// One or more repository roots to watch.
+        #[arg(default_value = ".", num_args = 1..)]
+        paths: Vec<PathBuf>,
         /// LadybugDB database path.
         #[arg(long)]
         db: PathBuf,
@@ -120,9 +120,10 @@ pub enum Command {
         /// LadybugDB database path.
         #[arg(long)]
         db: PathBuf,
-        /// Also watch this repo and keep the index live while serving.
-        #[arg(long)]
-        watch: Option<PathBuf>,
+        /// Watch these repos and keep the index live while serving (repeatable —
+        /// pass each workspace repo).
+        #[arg(long, action = clap::ArgAction::Append)]
+        watch: Vec<PathBuf>,
         /// Keep embeddings fresh while watching (requires --watch).
         #[arg(long)]
         embed: bool,
@@ -136,9 +137,10 @@ pub enum Command {
         /// Port to serve on.
         #[arg(long, default_value_t = 7700)]
         port: u16,
-        /// Also watch this repo and keep the index live while serving.
-        #[arg(long)]
-        watch: Option<PathBuf>,
+        /// Watch these repos and keep the index live while serving (repeatable —
+        /// pass each workspace repo).
+        #[arg(long, action = clap::ArgAction::Append)]
+        watch: Vec<PathBuf>,
         /// Keep embeddings fresh while watching (requires --watch).
         #[arg(long)]
         embed: bool,

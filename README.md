@@ -104,11 +104,12 @@ Vertical slices, each one builds and runs:
       names cross repos. Killed the cross-repo false-edge noise a token test
       exposed at workspace scale.
 - [x] **Slice 13 — type-aware resolution.** Methods carry their owner type
-      (Rust `impl` / Go receiver / TS+JS+Python `class`). Calls resolve via:
-      `self`/`this` → enclosing type, and **typed params / Go receivers → the
-      variable's type**. Verified on Rust + Go fixtures (two types sharing a
-      method name → the call hits the right one). *(Local `let`/`:=` constructor
-      inference: the remaining follow-up.)*
+      (Rust `impl` / Go receiver / TS+JS+Python `class`). Method calls resolve by
+      **receiver type**: `self`/`this` → enclosing type; typed params + Go
+      receivers → the param/receiver type; local `let`/`:=`/`new` constructors →
+      the inferred type; qualified `Type::new()` → the qualifier. Verified across
+      Rust/Go/TS fixtures (two types sharing a method name → the right one wins).
+      Complete for the static languages; Python stays name-based for dynamic cases.
 
 ## Build & use
 
