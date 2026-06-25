@@ -114,6 +114,7 @@ and your agent gets the same answers.
 | `call-chain <name> --db <db> [--depth N] [--repo <name>]` | Everything transitively reachable from a symbol via calls. |
 | `analyze --db <db>` | Compute + store PageRank importance and Louvain communities. |
 | `important --db <db> [--k N] [--repo <name>]` | Most-depended-on definitions (by PageRank); `--repo` ranks within one repo. |
+| `outline --db <db> [--repo <name>] [--limit N]` | Structural map: classes/functions grouped by file (scope with `--repo`). |
 | `communities --db <db> [--k N]` | Largest code clusters (modules) found by Louvain. |
 | `watch <repo…> --db <db> [--embed]` | Keep the graph fresh as you edit — incremental, no full reindex. |
 | `serve --db <db> [--watch <repo>…] [--embed] [--reanalyze <secs>]` | MCP server over stdio for AI agents. |
@@ -129,7 +130,9 @@ Point any MCP client at `codegraph serve`. For **Claude Code**:
 claude mcp add codegraph -- /abs/path/to/codegraph serve --db /abs/path/to/graph.db
 ```
 
-Tools exposed: `search` (by meaning), `who_calls`, `call_chain`, `important`.
+Tools exposed: `outline` (map a repo's classes/functions by file — call this
+before reading files), `search` (by meaning), `who_calls`, `call_chain`,
+`important`.
 
 **Scope to one repo.** In a multi-repo workspace, every tool takes an optional
 `repo` arg (a repo name, e.g. `"my-repo"`) to answer for just that
@@ -273,6 +276,15 @@ Built as vertical slices — each one builds and runs. ✅ = shipped.
       a timeout so a tool call fails fast instead of hanging. Verified: ~9k
       queries answered with ~6 ms max latency *while* a writer hammered the same
       store (regression test `reads_stay_responsive_under_concurrent_writes`).
+- [x] **Slice 16 — per-repo scoping + Python imports + outline.** Every query
+      tool takes an optional `repo` filter (scope a workspace answer to one
+      repo). **Python import resolution** maps dotted modules (`a.b.c`, relative
+      `.`/`..`) to files, so Python finally gets real cross-file call edges and
+      an imported-file resolution tier (verified: 0 → 175 import edges on a real
+      Api repo). New **`outline`** tool/command lists a repo's
+      classes/functions by file, so an agent maps a repo's shape in one call
+      instead of reading every directory. Plus: the embedding model loads from
+      an absolute cache (`$HOME/.cache/codegraph/fastembed`), CWD-independent.
 
 </details>
 
