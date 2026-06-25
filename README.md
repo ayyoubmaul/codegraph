@@ -139,6 +139,12 @@ before reading files), `search` (by meaning), `who_calls`, `call_chain`,
 repo instead of the whole workspace — e.g. `important` ranked within one repo,
 or `search` limited to it. On the CLI it's `--repo <name>`.
 
+**Recommended agent workflow** (so the agent uses the graph instead of grepping):
+`outline` a repo first → `search` by meaning → `who_calls`/`call_chain` to trace.
+The server advertises this in its MCP `instructions`, and [`AGENTS.md`](AGENTS.md)
+has a copy you can paste into your agent's global rules so it applies to every
+repo. (codegraph indexes code only — read configs/SQL/docs directly.)
+
 For a **live** index that updates as you edit, add `--watch <repo>` (and
 `--embed` to keep semantic search fresh) — one process serves *and* watches, no
 second process and no lock conflict:

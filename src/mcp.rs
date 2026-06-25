@@ -234,11 +234,20 @@ impl ServerHandler for CodegraphServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(
-            "codegraph: a structural + semantic code graph. Tools: outline (map a \
-             repo's classes/functions by file — use this before reading files), \
-             search (find code by meaning), who_calls, call_chain, important \
-             (PageRank). In a multi-repo workspace, pass the optional `repo` arg (a \
-             repo name, e.g. 'my-repo') to scope any tool to a single repo."
+            "codegraph is a structural + semantic index of the indexed codebase(s). \
+             Prefer it over reading or grepping files when exploring code:\n\
+             • Understand a repo's shape: call `outline` FIRST (it lists every \
+             class/function per file in one call). Read individual files only after \
+             it points you somewhere — don't walk the tree by hand.\n\
+             • Find where something lives: use `search` (by meaning) instead of \
+             grepping for names.\n\
+             • Trace relationships: `who_calls` and `call_chain`; `important` ranks \
+             the most-depended-on code.\n\
+             • Multi-repo workspace: pass the optional `repo` arg (a repo name, e.g. \
+             'my-repo') to scope any tool to one repo.\n\
+             Scope note: only code definitions in Rust/Python/Go/TS-JS are indexed — \
+             config/data/docs (.toml, .sql, .yaml, .md, …) are not, so read those \
+             files directly."
                 .into(),
         );
         info
