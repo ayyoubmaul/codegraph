@@ -76,8 +76,11 @@ but it deliberately beats three of its tradeoffs:
 - [Rust toolchain](https://rustup.rs/) (stable).
 - `cmake` — `lbug` compiles LadybugDB's C++ core. macOS: `brew install cmake` ·
   Debian/Ubuntu: `sudo apt install cmake`.
-- The first `--embed` / `search` downloads the embedding model (~130 MB) once,
-  then everything runs offline.
+- The first `--embed` / `search` downloads the embedding model (~130 MB) once
+  to `$HOME/.cache/codegraph/fastembed` (override with `CODEGRAPH_CACHE_DIR`),
+  then everything runs offline. The path is absolute, so a long-running
+  `serve`/`ui` finds the model no matter which directory the client launches it
+  from.
 
 **Build**
 
@@ -106,11 +109,11 @@ and your agent gets the same answers.
 | Command | What it does |
 | --- | --- |
 | `index <repo…> --db <db> [--embed]` | Walk, parse, and build the graph. Pass several repos for a cross-repo workspace. `--embed` adds semantic vectors. |
-| `search "<text>" --db <db>` | Semantic search — find definitions by meaning (needs an `--embed`-ed db). |
-| `who-calls <name> --db <db>` | Direct callers of a symbol. |
-| `call-chain <name> --db <db> [--depth N]` | Everything transitively reachable from a symbol via calls. |
+| `search "<text>" --db <db> [--repo <name>]` | Semantic search — find definitions by meaning (needs an `--embed`-ed db). `--repo` scopes to one repo. |
+| `who-calls <name> --db <db> [--repo <name>]` | Direct callers of a symbol. |
+| `call-chain <name> --db <db> [--depth N] [--repo <name>]` | Everything transitively reachable from a symbol via calls. |
 | `analyze --db <db>` | Compute + store PageRank importance and Louvain communities. |
-| `important --db <db> [--k N]` | Most-depended-on definitions (by PageRank). |
+| `important --db <db> [--k N] [--repo <name>]` | Most-depended-on definitions (by PageRank); `--repo` ranks within one repo. |
 | `communities --db <db> [--k N]` | Largest code clusters (modules) found by Louvain. |
 | `watch <repo…> --db <db> [--embed]` | Keep the graph fresh as you edit — incremental, no full reindex. |
 | `serve --db <db> [--watch <repo>…] [--embed] [--reanalyze <secs>]` | MCP server over stdio for AI agents. |
@@ -127,6 +130,11 @@ claude mcp add codegraph -- /abs/path/to/codegraph serve --db /abs/path/to/graph
 ```
 
 Tools exposed: `search` (by meaning), `who_calls`, `call_chain`, `important`.
+
+**Scope to one repo.** In a multi-repo workspace, every tool takes an optional
+`repo` arg (a repo name, e.g. `"my-repo"`) to answer for just that
+repo instead of the whole workspace — e.g. `important` ranked within one repo,
+or `search` limited to it. On the CLI it's `--repo <name>`.
 
 For a **live** index that updates as you edit, add `--watch <repo>` (and
 `--embed` to keep semantic search fresh) — one process serves *and* watches, no
