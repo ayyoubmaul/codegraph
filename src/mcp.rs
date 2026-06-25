@@ -7,6 +7,9 @@ use std::sync::Arc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpService, session::local::LocalSessionManager,
+};
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router,
     transport::stdio,
@@ -338,5 +341,62 @@ pub async fn serve_watch(
         .serve(stdio())
         .await?;
     service.waiting().await?;
+    Ok(())
+}
+
+/// Serve the MCP protocol over **HTTP** (streamable-http) so *multiple* clients
+/// (e.g. opencode and Claude Code) can use one codegraph at once. Because
+/// LadybugDB allows only a single writer process, the usual one-`serve`-process-
+/// per-client (stdio) model can't share a live, watched workspace — the second
+/// process can't open the locked DB. Here a single process holds the DB and
+/// every connecting client gets a handle to the *same* shared store / vector
+/// index / embedder, so they all see the same live index with no lock conflict.
+pub async fn serve_http(
+    db: &Path,
+    repos: &[PathBuf],
+    embed: bool,
+    reanalyze: Option<u64>,
+    addr: &str,
+) -> anyhow::Result<()> {
+    let store: Arc<LadybugStore> = Arc::new(LadybugStore::open(db)?);
+    let vindex: crate::vector::SharedVector = Arc::new(tokio::sync::RwLock::new(None));
+    let query_embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
+    crate::embed::warm(query_embedder.clone());
+
+    if repos.is_empty() {
+        // No --watch: build the vector index once from the existing db.
+        *vindex.write().await = crate::vector::build_from_store(&store)?;
+    } else {
+        // --watch: index + watch on a background thread (its own batch embedder).
+        let watch_embedder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
+        let (s2, v2, repos) = (store.clone(), vindex.clone(), repos.to_vec());
+        std::thread::spawn(move || {
+            if let Err(e) =
+                crate::watch::index_and_watch(&repos, s2, watch_embedder, v2, embed, reanalyze)
+            {
+                eprintln!("codegraph: index/watch stopped: {e}");
+            }
+        });
+    }
+
+    // Each connecting client is one session; the factory hands it a server that
+    // shares the same store/embedder/vindex Arcs — one process, one DB lock.
+    let service = StreamableHttpService::new(
+        move || {
+            Ok(CodegraphServer::with_shared(
+                store.clone(),
+                query_embedder.clone(),
+                vindex.clone(),
+            ))
+        },
+        Arc::new(LocalSessionManager::default()),
+        Default::default(),
+    );
+    let app = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("bind {addr}: {e}"))?;
+    eprintln!("codegraph MCP (HTTP) → http://{addr}/mcp  (connect multiple clients here)");
+    axum::serve(listener, app).await?;
     Ok(())
 }

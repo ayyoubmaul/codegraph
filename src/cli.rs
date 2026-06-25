@@ -156,6 +156,10 @@ pub enum Command {
         /// seconds — they're batch, not incremental.
         #[arg(long)]
         reanalyze: Option<u64>,
+        /// Serve MCP over HTTP at this address (e.g. 127.0.0.1:7777) instead of
+        /// stdio, so multiple clients (opencode + Claude Code) share one process.
+        #[arg(long)]
+        http: Option<String>,
     },
 
     /// Launch the web UI to explore the graph in a browser.

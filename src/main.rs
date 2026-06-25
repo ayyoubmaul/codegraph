@@ -62,7 +62,8 @@ fn main() -> anyhow::Result<()> {
             watch,
             embed,
             reanalyze,
-        } => serve_cmd(&db, &watch, embed, reanalyze),
+            http,
+        } => serve_cmd(&db, &watch, embed, reanalyze, http.as_deref()),
         Command::Ui {
             db,
             port,
@@ -73,12 +74,19 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn serve_cmd(db: &Path, watch: &[PathBuf], embed: bool, reanalyze: Option<u64>) -> anyhow::Result<()> {
+fn serve_cmd(
+    db: &Path,
+    watch: &[PathBuf],
+    embed: bool,
+    reanalyze: Option<u64>,
+    http: Option<&str>,
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    if watch.is_empty() {
-        rt.block_on(mcp::serve(db))
-    } else {
-        rt.block_on(mcp::serve_watch(db, watch, embed, reanalyze))
+    match http {
+        // HTTP transport: one process, many clients (opencode + Claude Code).
+        Some(addr) => rt.block_on(mcp::serve_http(db, watch, embed, reanalyze, addr)),
+        None if watch.is_empty() => rt.block_on(mcp::serve(db)),
+        None => rt.block_on(mcp::serve_watch(db, watch, embed, reanalyze)),
     }
 }
 
