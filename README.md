@@ -117,7 +117,7 @@ and your agent gets the same answers.
 | `outline --db <db> [--repo <name>] [--limit N]` | Structural map: classes/functions grouped by file (scope with `--repo`). |
 | `communities --db <db> [--k N]` | Largest code clusters (modules) found by Louvain. |
 | `watch <repo…> --db <db> [--embed]` | Keep the graph fresh as you edit — incremental, no full reindex. |
-| `serve --db <db> [--watch <repo>…] [--embed] [--reanalyze <secs>]` | MCP server over stdio for AI agents. |
+| `serve --db <db> [--watch <repo>…] [--embed] [--reanalyze <secs>] [--http <addr>]` | MCP server for AI agents (stdio; `--http` serves many clients from one process). |
 | `ui --db <db> [--port N] [--watch <repo>…] [--reanalyze <secs>]` | Browser graph explorer. |
 
 Run `$B <command> --help` for every flag.
@@ -152,6 +152,34 @@ second process and no lock conflict:
 ```bash
 claude mcp add codegraph -- /abs/codegraph serve --db /abs/graph.db --watch /abs/repo --embed
 ```
+
+### Multiple clients on one workspace (HTTP)
+
+The default stdio transport runs **one server process per client**, but
+LadybugDB allows only a single writer process — so two clients (say opencode
+*and* Claude Code) each spawning `serve` against the same live `--db` collide on
+the database lock; the second fails to start.
+
+Run **one** HTTP server instead and point every client at it. One process holds
+the DB and watches the workspace; each client is a session sharing the same live
+index:
+
+```bash
+# Start the shared server (a daemon you run once):
+$B serve --http 127.0.0.1:7777 --db ws.db --watch /abs/repoA --watch /abs/repoB --embed --reanalyze 600
+```
+
+```bash
+# Claude Code connects over HTTP:
+claude mcp add --transport http codegraph http://127.0.0.1:7777/mcp
+```
+
+```jsonc
+// opencode (~/.config/opencode/opencode.json) — a remote MCP entry:
+"codegraph": { "type": "remote", "url": "http://127.0.0.1:7777/mcp", "enabled": true }
+```
+
+Both clients now share one live workspace with no lock conflict.
 
 ## Explore in a browser
 
@@ -291,6 +319,13 @@ Built as vertical slices — each one builds and runs. ✅ = shipped.
       classes/functions by file, so an agent maps a repo's shape in one call
       instead of reading every directory. Plus: the embedding model loads from
       an absolute cache (`$HOME/.cache/codegraph/fastembed`), CWD-independent.
+- [x] **Slice 17 — HTTP transport (multi-client).** `serve --http <addr>` serves
+      MCP over streamable-http on axum, so several clients (e.g. opencode *and*
+      Claude Code) connect to **one** running server and share the same live
+      index — sidestepping LadybugDB's single-writer-process lock that makes the
+      stdio "one process per client" model collide on a shared workspace. Each
+      client is a session over the same `Arc<LadybugStore>`/vector index.
+      Verified: two concurrent sessions (initialize → tools/list → tools/call).
 
 </details>
 
