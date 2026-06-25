@@ -1,1 +1,9 @@
 /target
+
+# Generated graph databases (build artifacts)
+*.db
+*.db.wal*
+*.db.wal.checkpoint
+
+# Downloaded embedding model cache
+.fastembed_cache/
